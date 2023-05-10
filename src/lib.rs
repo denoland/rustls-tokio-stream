@@ -1,14 +1,12 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
 use futures::future::poll_fn;
-use futures::task::noop_waker_ref;
 use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
 use futures::task::RawWaker;
 use futures::task::RawWakerVTable;
 use futures::task::Waker;
-use tokio::spawn;
 use tokio::task::spawn_blocking;
 
 use crate::inner::Flow;
