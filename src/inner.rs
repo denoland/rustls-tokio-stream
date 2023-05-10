@@ -226,6 +226,9 @@ impl TlsStreamInner {
         buf.assume_init(bytes_read)
       };
       buf.advance(bytes_read);
+    } else if self.rd_state == State::TcpClosed {
+      // If we got a FIN, return ConnectionReset
+      return Poll::Ready(Err(ErrorKind::ConnectionReset.into()));
     }
 
     Poll::Ready(Ok(()))

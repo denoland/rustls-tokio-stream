@@ -69,6 +69,11 @@ impl TlsStream {
     Self::new(tcp, Connection::Server(connection))
   }
 
+  pub fn into_inner(mut self) -> (TcpStream, Connection) {
+    let inner = self.0.take().unwrap();
+    (inner.tcp, inner.tls)
+  }
+
   pub fn into_split(self) -> (ReadHalf, WriteHalf) {
     let shared = Shared::new(self);
     let rd = ReadHalf {
@@ -147,7 +152,9 @@ impl AsyncWrite for TlsStream {
 
 impl Drop for TlsStream {
   fn drop(&mut self) {
-    let mut inner = self.0.take().unwrap();
+    let Some(mut inner) = self.0.take() else {
+      return;
+    };
 
     // If read and write are closed, we can fast exit here
     if inner.wr_state != State::StreamOpen && inner.rd_state != State::StreamOpen {
@@ -335,18 +342,24 @@ impl Shared {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use futures::stream::FuturesUnordered;
+  use futures::FutureExt;
+  use futures::StreamExt;
   use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
   use rustls::Certificate;
   use rustls::PrivateKey;
   use std::io::BufRead;
+  use std::io::ErrorKind;
   use std::net::Ipv4Addr;
   use std::net::SocketAddrV4;
+  use std::time::Duration;
   use tokio::io::AsyncReadExt;
   use tokio::io::AsyncWriteExt;
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
   use tokio::spawn;
+  use tokio::task::JoinSet;
 
   struct UnsafeVerifier {}
 
@@ -452,7 +465,41 @@ mod tests {
       client.write_all(b"hello!").await.unwrap();
       let mut buf = [0; 6];
       client.read_exact(&mut buf).await.unwrap();
-      assert_eq!(buf.as_slice(), b"hello?");
+    });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_orderly_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, mut client) = tls_pair().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let a = spawn(async move {
+      server.write_all(b"hello?").await.unwrap();
+      let mut buf = [0; 6];
+      server.read_exact(&mut buf).await.unwrap();
+      assert_eq!(buf.as_slice(), b"hello!");
+      // Shut down write, but reads are still open
+      server.shutdown().await.unwrap();
+      server.read_exact(&mut buf).await.unwrap();
+      assert_eq!(buf.as_slice(), b"hello*");
+      // Tell the client to shut down at some point after we've closed the server TCP socket.
+      drop(server);
+      tokio::time::sleep(Duration::from_millis(10)).await;
+      tx.send(()).unwrap();
+    });
+    let b = spawn(async move {
+      client.write_all(b"hello!").await.unwrap();
+      let mut buf = [0; 6];
+      client.read_exact(&mut buf).await.unwrap();
+      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+      client.write_all(b"hello*").await.unwrap();
+      // The server is long gone by the point we get the message, but it's a clean shutdown
+      rx.await.unwrap();
+      client.shutdown().await.unwrap();
+      drop(client);
     });
     a.await?;
     b.await?;
@@ -465,7 +512,7 @@ mod tests {
     let (mut server, mut client) = tls_pair().await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
-      // Shut down before the handshake
+      // Shut down after the handshake
       server.handshake().await.unwrap();
       server.shutdown().await.unwrap();
       tx.send(()).unwrap();
@@ -482,6 +529,88 @@ mod tests {
     a.await?;
     b.await?;
 
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_shutdown_before_handshake() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      let mut futures = FuturesUnordered::new();
+
+      // The client handshake must complete before the server shutdown is resolved
+      futures.push(server.shutdown().map(|_| 1).boxed());
+      futures.push(client.handshake().map(|_| 2).boxed());
+
+      assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 2);
+      assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 1);
+      drop(futures);
+
+      // Can't read -- server shut down
+      let mut buf: [u8; 10] = [0; 10];
+      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+    });
+    a.await?;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_dropped() -> Result<(), Box<dyn std::error::Error>> {
+    let (server, mut client) = tls_pair().await;
+    drop(server);
+    client.handshake().await?;
+    // Can't read -- server shut down
+    let mut buf: [u8; 10] = [0; 10];
+    assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_client_dropped() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, client) = tls_pair().await;
+    drop(client);
+    server.handshake().await?;
+    // Can't read -- server shut down
+    let mut buf: [u8; 10] = [0; 10];
+    assert_eq!(server.read(&mut buf).await.unwrap(), 0);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_crash() -> Result<(), Box<dyn std::error::Error>> {
+    let (server, mut client) = tls_pair().await;
+    let (mut tcp, _tls) = server.into_inner();
+    tcp.shutdown().await?;
+
+    expect_io_error(client.handshake().await, ErrorKind::UnexpectedEof);
+    // Can't read -- server shut down
+    let mut buf: [u8; 10] = [0; 10];
+    expect_io_error(client.read(&mut buf).await, ErrorKind::UnexpectedEof);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_crash_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      server.handshake().await.unwrap();
+      server
+    });
+    let b = spawn(async move {
+      client.handshake().await.unwrap();
+      client
+    });
+
+    let server = a.await?;
+    let mut client = b.await?;
+    let (mut tcp, _tls) = server.into_inner();
+    tcp.shutdown().await?;
+    drop(tcp);
+
+    // Can't read -- server shut down
+    let mut buf: [u8; 10] = [0; 10];
+    expect_io_error(client.read(&mut buf).await, ErrorKind::ConnectionReset);
     Ok(())
   }
 }
