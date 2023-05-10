@@ -9,6 +9,7 @@ use futures::task::RawWaker;
 use futures::task::RawWakerVTable;
 use futures::task::Waker;
 use tokio::spawn;
+use tokio::task::spawn_blocking;
 
 use crate::inner::Flow;
 use crate::inner::State;
@@ -21,10 +22,12 @@ use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
 use std::io;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
@@ -161,13 +164,26 @@ impl Drop for TlsStream {
       return;
     }
 
-    let mut cx = Context::from_waker(noop_waker_ref());
-    let use_linger_task = inner.poll_close(&mut cx).is_pending();
+    let mut tls = inner.tls;
+    if (tls.is_handshaking() && tls.wants_read()) || tls.wants_write() {
+      let mut tcp = inner.tcp.into_std().unwrap();
+      tcp.set_nonblocking(false).unwrap();
+      tcp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+      tcp.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
 
-    if use_linger_task {
-      spawn(poll_fn(move |cx: &mut Context| inner.poll_close(cx)));
-    } else if cfg!(debug_assertions) {
-      spawn(async {}); // Spawn dummy task to detect missing LocalSet.
+      spawn_blocking(move || {
+        if tls.is_handshaking() {
+          if tls.complete_io(&mut tcp).is_err() {
+            return;
+          }
+        }
+        assert!(!tls.is_handshaking());
+        if tls.wants_write() {
+          if tls.complete_io(&mut tcp).is_err() {
+            return;
+          }
+        }
+      });
     }
   }
 }
@@ -590,7 +606,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_dropped_after_handshake_with_write() -> Result<(), Box<dyn std::error::Error>> {
+  async fn test_server_dropped_after_handshake_with_write() -> Result<(), Box<dyn std::error::Error>>
+  {
     let (mut server, mut client) = tls_pair_handshake().await;
     server.write_all(b"XYZ").await.unwrap();
     drop(server);
