@@ -165,6 +165,12 @@ impl TlsStreamInner {
           }
           Ok(_) => continue,
           Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+          Err(err) if err.kind() == ErrorKind::ConnectionReset => {
+            // Rare, but happens more reliably when stepping through poll_io in a debugger after
+            // remote TCP connection has been shut down. This suggests a race somewhere in this code.
+            self.rd_state = State::TcpClosed;
+            continue;
+          }
           Err(err) => return Poll::Ready(Err(err)),
         }
 
@@ -226,9 +232,6 @@ impl TlsStreamInner {
         buf.assume_init(bytes_read)
       };
       buf.advance(bytes_read);
-    } else if self.rd_state == State::TcpClosed {
-      // If we got a FIN, return ConnectionReset
-      return Poll::Ready(Err(ErrorKind::ConnectionReset.into()));
     }
 
     Poll::Ready(Ok(()))
