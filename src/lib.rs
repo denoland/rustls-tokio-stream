@@ -110,6 +110,10 @@ impl TlsStream {
   pub fn get_alpn_protocol(&mut self) -> Option<&[u8]> {
     self.inner_mut().tls.alpn_protocol()
   }
+
+  pub async fn shutdown(&mut self) -> io::Result<()> {
+    poll_fn(|cx| self.inner_mut().poll_shutdown(cx)).await
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -201,6 +205,19 @@ impl WriteHalf {
         .poll_with_shared_waker(cx, Flow::Write, |mut tls, cx| tls.poll_handshake(cx))
     })
     .await
+  }
+
+  pub async fn shutdown(&mut self) -> io::Result<()> {
+    poll_fn(move |cx| {
+      self
+        .shared
+        .poll_with_shared_waker(cx, Flow::Write, |tls, cx| tls.poll_shutdown(cx))
+    })
+    .await
+  }
+
+  pub fn get_alpn_protocol(&self) -> Option<Vec<u8>> {
+    self.shared.get_alpn_protocol()
   }
 }
 
@@ -307,6 +324,11 @@ impl Shared {
     // TODO(bartlomieju):
     #[allow(clippy::undocumented_unsafe_blocks)]
     let _ = unsafe { Weak::from_raw(self_ptr as *const Self) };
+  }
+
+  fn get_alpn_protocol(self: &Arc<Self>) -> Option<Vec<u8>> {
+    let mut tls_stream = self.tls_stream.lock();
+    tls_stream.get_alpn_protocol().map(|s| s.to_vec())
   }
 }
 
@@ -416,18 +438,51 @@ mod tests {
   #[tokio::test]
   async fn test_client_server() -> Result<(), Box<dyn std::error::Error>> {
     let (mut server, mut client) = tls_pair().await;
-    spawn(async move {
+    let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
       let mut buf = [0; 6];
       server.read_exact(&mut buf).await.unwrap();
       assert_eq!(buf.as_slice(), b"hello!");
     });
-    spawn(async move {
+    let b = spawn(async move {
       client.write_all(b"hello!").await.unwrap();
       let mut buf = [0; 6];
       client.read_exact(&mut buf).await.unwrap();
       assert_eq!(buf.as_slice(), b"hello?");
     });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_shutdown_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, mut client) = tls_pair().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let a = spawn(async move {
+      // Shut down before the handshake
+      server.handshake().await.unwrap();
+      server.shutdown().await.unwrap();
+      tx.send(()).unwrap();
+      assert_eq!(
+        server
+          .write_all(b"hello?")
+          .await
+          .expect_err("should be shut down")
+          .kind(),
+        io::ErrorKind::BrokenPipe
+      );
+    });
+    let b = spawn(async move {
+      assert!(client.get_ref().1.is_handshaking());
+      client.handshake().await.unwrap();
+      rx.await.unwrap();
+      let mut buf = [0; 6];
+      client.read_exact(&mut buf).await.expect_err("early eof");
+    });
+    a.await?;
+    b.await?;
 
     Ok(())
   }
