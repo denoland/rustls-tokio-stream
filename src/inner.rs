@@ -278,21 +278,83 @@ impl TlsStreamInner {
     Poll::Ready(Ok(()))
   }
 
-  pub(crate) fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+  pub(crate) fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<bool>> {
     if self.rd_state == State::StreamOpen {
       self.rd_state = State::StreamClosed;
     }
+    if self.wr_state == State::StreamClosed {
+      self.wr_state = State::StreamClosed;
+    }
 
-    // Wait for the handshake to complete.
-    ready!(self.poll_io(cx, Flow::Handshake))?;
-    // Send TLS 'CloseNotify' alert.
-    ready!(self.poll_shutdown(cx))?;
-    // Wait for 'CloseNotify', shut down TCP stream, wait for TCP FIN packet.
-    ready!(self.poll_io(cx, Flow::Read))?;
+    if self.tls.is_handshaking() {
+      if self.tls.wants_write() {
+        loop {
+          let mut write = ImplementWriteTrait(&mut self.tcp);
+          match self.tls.write_tls(&mut write) {
+            Ok(n) => {
+              assert!(n > 0);
+              return Poll::Ready(Ok(false));
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+              if !self.tcp.poll_write_ready(cx)?.is_pending() {
+                continue;
+              }
+              return Poll::Pending;
+            }
+            Err(err) => return Poll::Ready(Err(err)),
+          }
+        }
+      }
 
-    assert_eq!(self.rd_state, State::TcpClosed);
-    assert_eq!(self.wr_state, State::TcpClosed);
+      if self.tls.wants_read() {
+        loop {
+          let mut read = ImplementReadTrait(&mut self.tcp);
+          match self.tls.read_tls(&mut read) {
+            Ok(n) => {
+              if n == 0 {
+                return Poll::Ready(Err(ErrorKind::UnexpectedEof.into()));
+              }
+              self
+                .tls
+                .process_new_packets()
+                .map_err(|_| ErrorKind::InvalidData)?;
+              return Poll::Ready(Ok(false));
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+              if !self.tcp.poll_read_ready(cx)?.is_pending() {
+                continue;
+              }
+              return Poll::Pending;
+            }
+            Err(err) => return Poll::Ready(Err(err)),
+          }
+        }
+      }
 
-    Poll::Ready(Ok(()))
+      unreachable!("Handshaking, but no read or write interest");
+    }
+
+    if self.tls.wants_write() {
+      loop {
+        let mut write = ImplementWriteTrait(&mut self.tcp);
+        match self.tls.write_tls(&mut write) {
+          Ok(n) => {
+            assert!(n > 0);
+            return Poll::Ready(Ok(false));
+          }
+          Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            if !self.tcp.poll_write_ready(cx)?.is_pending() {
+              continue;
+            }
+            return Poll::Pending;
+          }
+          Err(err) => return Poll::Ready(Err(err)),
+        }
+      }
+    }
+
+    self.rd_state = State::TcpClosed;
+    self.wr_state = State::TcpClosed;
+    return Poll::Ready(Ok(true));
   }
 }

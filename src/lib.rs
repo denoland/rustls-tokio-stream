@@ -7,6 +7,7 @@ use futures::task::Poll;
 use futures::task::RawWaker;
 use futures::task::RawWakerVTable;
 use futures::task::Waker;
+use tokio::spawn;
 use tokio::task::spawn_blocking;
 
 use crate::inner::Flow;
@@ -162,23 +163,16 @@ impl Drop for TlsStream {
       return;
     }
 
-    let mut tls = inner.tls;
+    let tls = &inner.tls;
     if (tls.is_handshaking() && tls.wants_read()) || tls.wants_write() {
-      let mut tcp = inner.tcp.into_std().unwrap();
-      tcp.set_nonblocking(false).unwrap();
-      tcp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-      tcp.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
-
-      spawn_blocking(move || {
-        if tls.is_handshaking() {
-          if tls.complete_io(&mut tcp).is_err() {
-            return;
-          }
-        }
-        assert!(!tls.is_handshaking());
-        if tls.wants_write() {
-          if tls.complete_io(&mut tcp).is_err() {
-            return;
+      spawn(async move {
+        loop {
+          // If we get Ok(true) or Err(..) from poll_close, abort the loop and let the TCP connection
+          // drop.
+          if let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {
+            continue;
+          } else {
+            break;
           }
         }
       });
