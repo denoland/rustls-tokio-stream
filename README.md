@@ -1,2 +1,3 @@
 # rustls-tokio-stream
-AsyncRead/AsyncWrite interface for RustTLS-on-Tokio
+
+AsyncRead/AsyncWrite interface for rustls-on-Tokio.
