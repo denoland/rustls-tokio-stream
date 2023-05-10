@@ -435,6 +435,10 @@ mod tests {
     (server, client)
   }
 
+  fn expect_io_error<T: std::fmt::Debug>(e: Result<T, io::Error>, kind: io::ErrorKind) {
+    assert_eq!(e.expect_err("Expected error").kind(), kind);
+  }
+
   #[tokio::test]
   async fn test_client_server() -> Result<(), Box<dyn std::error::Error>> {
     let (mut server, mut client) = tls_pair().await;
@@ -465,21 +469,15 @@ mod tests {
       server.handshake().await.unwrap();
       server.shutdown().await.unwrap();
       tx.send(()).unwrap();
-      assert_eq!(
-        server
-          .write_all(b"hello?")
-          .await
-          .expect_err("should be shut down")
-          .kind(),
-        io::ErrorKind::BrokenPipe
-      );
+      expect_io_error(server.write_all(b"hello?").await, io::ErrorKind::BrokenPipe);
     });
     let b = spawn(async move {
       assert!(client.get_ref().1.is_handshaking());
       client.handshake().await.unwrap();
       rx.await.unwrap();
-      let mut buf = [0; 6];
-      client.read_exact(&mut buf).await.expect_err("early eof");
+      // Can't read -- server shut down
+      let mut buf = [0; 10];
+      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
     });
     a.await?;
     b.await?;
