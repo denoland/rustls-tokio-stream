@@ -1,0 +1,17 @@
+[package]
+name = "rustls-tokio-stream"
+version = "0.1.0"
+edition = "2021"
+description = "AsyncRead/AsyncWrite interface for RustTLS on Tokio"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = [ "io-util", "net", "rt" ] }
+rustls = "0.21"
+futures = "0.3.21"
+parking_lot = "0.12.0"
+
+[dev_dependencies]
+tokio = { version = "1", features = [ "full" ] }
+rustls-pemfile = "1.0.0"
+rustls = { version = "0.21", features = [ "dangerous_configuration" ] }
