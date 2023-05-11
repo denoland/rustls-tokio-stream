@@ -228,7 +228,11 @@ impl TlsStreamInner {
           Err(err) if err.kind() == ErrorKind::ConnectionReset => {
             // Rare, but happens more reliably when stepping through poll_io in a debugger after
             // remote TCP connection has been shut down. This suggests a race somewhere in this code.
-            self.rd_state = State::TcpClosed;
+
+            // In addition, we may receive ConnectionReset when the remote has shut down its send
+            // channel and we haven't fully read everything out of the plaintext buffer. In either
+            // case we're just going to keep looping rather than changing the state as we cannot
+            // don't current have a state for "tcp shut down but tls still open".
             continue;
           }
           Err(err) => return Poll::Ready(Err(err)),
@@ -337,6 +341,9 @@ impl TlsStreamInner {
       Poll::Ready(Ok(_)) => {}
     };
 
+    // This is asserting on Linux, but it should not be
+    // assert!(!self.tls.wants_write() || self.tls.is_handshaking());
+
     // At minimum, a TLS 'CloseNotify' alert should have been sent.
     assert!(self.wr_state >= State::TlsClosed);
     // If we received a TLS 'CloseNotify' alert from the remote end
@@ -361,7 +368,7 @@ impl TlsStreamInner {
           match self.tls.write_tls(&mut write) {
             Ok(n) => {
               if n == 0 {
-                if !self.tcp.poll_write_ready(cx)?.is_pending() {
+                if !trace_poll_error(self.tcp.poll_write_ready(cx))?.is_pending() {
                   continue;
                 }
                 return Poll::Pending;
@@ -389,7 +396,7 @@ impl TlsStreamInner {
               return Poll::Ready(Ok(false));
             }
             Err(err) if err.kind() == ErrorKind::WouldBlock => {
-              if !self.tcp.poll_read_ready(cx)?.is_pending() {
+              if !trace_poll_error(self.tcp.poll_read_ready(cx))?.is_pending() {
                 continue;
               }
               return Poll::Pending;
@@ -409,7 +416,7 @@ impl TlsStreamInner {
           Ok(n) => {
             // If we couldn't write anything, the output buffer is full.
             if n == 0 {
-              if !self.tcp.poll_write_ready(cx)?.is_pending() {
+              if !trace_poll_error(self.tcp.poll_write_ready(cx))?.is_pending() {
                 continue;
               }
               return Poll::Pending;

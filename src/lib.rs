@@ -117,6 +117,12 @@ impl TlsStream {
   pub async fn shutdown(&mut self) -> io::Result<()> {
     poll_fn(|cx| self.inner_mut().poll_shutdown(cx)).await
   }
+
+  pub async fn close(mut self) -> io::Result<()> {
+    let mut inner = self.0.take().unwrap();
+    while !poll_fn(|cx| inner.poll_close(cx)).await? {}
+    Ok(())
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -715,10 +721,10 @@ mod tests {
     let (mut server, mut client) = tls_pair_handshake().await;
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
-      let buf = vec![0; BUF_COUNT * BUF_SIZE];
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
       server.write_all(&buf).await.unwrap();
       server.shutdown().await.unwrap();
-      drop(server);
+      server.close().await.unwrap();
     });
     let b = spawn(async move {
       for _ in 0..BUF_COUNT {
@@ -742,9 +748,9 @@ mod tests {
     let (mut server, mut client) = tls_pair_handshake().await;
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
-      let buf = vec![0; BUF_COUNT * BUF_SIZE];
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
       server.write_all(&buf).await.unwrap();
-      drop(server);
+      server.close().await.unwrap();
     });
     let b = spawn(async move {
       for _ in 0..BUF_COUNT {
