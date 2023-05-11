@@ -216,7 +216,7 @@ impl WriteHalf {
     poll_fn(move |cx| {
       self
         .shared
-        .poll_with_shared_waker(cx, Flow::Write, |tls, cx| tls.poll_shutdown(cx))
+        .poll_with_shared_waker(cx, Flow::Shutdown, |tls, cx| tls.poll_shutdown(cx))
     })
     .await
   }
@@ -242,7 +242,7 @@ impl AsyncWrite for WriteHalf {
   fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self
       .shared
-      .poll_with_shared_waker(cx, Flow::Write, |tls, cx| tls.poll_shutdown(cx))
+      .poll_with_shared_waker(cx, Flow::Shutdown, |tls, cx| tls.poll_shutdown(cx))
   }
 }
 
@@ -271,7 +271,7 @@ impl Shared {
     match flow {
       Flow::Handshake => unreachable!(),
       Flow::Read => self.rd_waker.register(cx.waker()),
-      Flow::Write => self.wr_waker.register(cx.waker()),
+      Flow::Write | Flow::Shutdown => self.wr_waker.register(cx.waker()),
     }
 
     let shared_waker = self.new_shared_waker();

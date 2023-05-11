@@ -23,6 +23,7 @@ pub(crate) enum Flow {
   Handshake,
   Read,
   Write,
+  Shutdown,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -62,6 +63,7 @@ impl Read for ImplementReadTrait<'_, TcpStream> {
     match self.0.try_read(buf) {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
+      Err(err) if err.kind() == ErrorKind::ConnectionReset => Err(err),
       Err(err) => Err(trace_error(err)),
     }
   }
@@ -214,6 +216,15 @@ impl TlsStreamInner {
           }
           Ok(_) => continue,
           Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+          Err(err) if err.kind() == ErrorKind::ConnectionAborted => {
+            // Happens in Windows during orderly shutdown. Treat as EOF if we're in shutdown.
+            if flow == Flow::Shutdown {
+              self.rd_state = State::TcpClosed;
+            } else {
+              return Poll::Ready(Err(err));
+            }
+            continue;
+          }
           Err(err) if err.kind() == ErrorKind::ConnectionReset => {
             // Rare, but happens more reliably when stepping through poll_io in a debugger after
             // remote TCP connection has been shut down. This suggests a race somewhere in this code.
@@ -250,7 +261,7 @@ impl TlsStreamInner {
         _ if self.tls.is_handshaking() => false,
         Flow::Handshake => true,
         Flow::Read => rd_ready,
-        Flow::Write => wr_ready,
+        Flow::Write | Flow::Shutdown => wr_ready,
       };
       return match io_ready {
         false => Poll::Pending,
@@ -320,7 +331,7 @@ impl TlsStreamInner {
       self.wr_state = State::StreamClosed;
     }
 
-    match self.poll_io(cx, Flow::Write) {
+    match self.poll_io(cx, Flow::Shutdown) {
       Poll::Pending => return Poll::Pending,
       Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
       Poll::Ready(Ok(_)) => {}
