@@ -74,10 +74,6 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
     match self.0.try_write(buf) {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(0),
-      // If the socket connection is closed, treat as EOF rather than error
-      Err(err) if err.kind() == ErrorKind::BrokenPipe => Ok(0),
-      // This is often seen on Windows
-      Err(err) if err.kind() == ErrorKind::ConnectionAborted => Ok(0),
       Err(err) => Err(trace_error(err)),
     }
   }
@@ -304,7 +300,15 @@ impl TlsStreamInner {
       self.wr_state = State::StreamClosed;
     }
 
-    ready!(self.poll_io(cx, Flow::Write))?;
+    match self.poll_io(cx, Flow::Write) {
+      Poll::Pending => return Poll::Pending,
+      // If the socket connection is closed, treat as EOF rather than error
+      Poll::Ready(Err(err)) if err.kind() == ErrorKind::BrokenPipe => return Poll::Ready(Ok(())),
+      // This is often seen on Windows, treat as EOF
+      Poll::Ready(Err(err)) if err.kind() == ErrorKind::ConnectionAborted => return Poll::Ready(Ok(())),
+      Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+      Poll::Ready(Ok(_)) => {},
+    };
 
     // At minimum, a TLS 'CloseNotify' alert should have been sent.
     assert!(self.wr_state >= State::TlsClosed);
