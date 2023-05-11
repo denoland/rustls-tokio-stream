@@ -251,6 +251,11 @@ impl TlsStreamInner {
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
+    // If the stream is closed, reads return immediately
+    if self.rd_state == State::TcpClosed {
+      return Poll::Ready(Ok(()))
+    }
+
     ready!(self.poll_io(cx, Flow::Read))?;
 
     if self.rd_state == State::StreamOpen {
