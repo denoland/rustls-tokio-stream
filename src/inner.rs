@@ -74,6 +74,8 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
     match self.0.try_write(buf) {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(0),
+      // If the socket connection is closed, treat as EOF rather than error
+      Err(err) if err.kind() == ErrorKind::BrokenPipe => Ok(0),
       Err(err) => Err(trace_error(err)),
     }
   }
