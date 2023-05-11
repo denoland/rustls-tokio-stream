@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "AsyncRead/AsyncWrite interface for RustTLS on Tokio"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/denoland/rustls-tokio-stream"
 
 [dependencies]
 tokio = { version = "1", features = [ "io-util", "net", "rt" ] }
