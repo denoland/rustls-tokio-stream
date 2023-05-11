@@ -358,6 +358,8 @@ mod tests {
   use tokio::net::TcpSocket;
   use tokio::spawn;
 
+  type TestResult = Result<(), std::io::Error>;
+
   struct UnsafeVerifier {}
 
   impl ServerCertVerifier for UnsafeVerifier {
@@ -475,7 +477,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_client_server() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_client_server() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
@@ -495,7 +498,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_client_immediate_close() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_client_immediate_close() -> TestResult {
     let (mut server, client) = tls_pair().await;
     let a = spawn(async move {
       server.shutdown().await.unwrap();
@@ -514,7 +518,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_immediate_close() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_immediate_close() -> TestResult {
     let (server, mut client) = tls_pair().await;
     let a = spawn(async move {
       drop(server);
@@ -533,7 +538,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_orderly_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_orderly_shutdown() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
@@ -568,7 +574,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_shutdown_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_shutdown_after_handshake() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
@@ -592,7 +599,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_shutdown_before_handshake() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_shutdown_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     let a = spawn(async move {
       let mut futures = FuturesUnordered::new();
@@ -614,7 +622,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_dropped() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped() -> TestResult {
     let (server, mut client) = tls_pair().await;
     // The server will spawn a task to complete the handshake and then go away
     drop(server);
@@ -625,7 +634,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_dropped_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped_after_handshake() -> TestResult {
     let (server, mut client) = tls_pair_handshake().await;
     drop(server);
     // Can't read -- server shut down (but it was graceful)
@@ -634,7 +644,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_dropped_after_handshake_with_write() -> Result<(), Box<dyn std::error::Error>>
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped_after_handshake_with_write() -> TestResult
   {
     let (mut server, mut client) = tls_pair_handshake().await;
     server.write_all(b"XYZ").await.unwrap();
@@ -646,7 +657,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_client_dropped() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_client_dropped() -> TestResult {
     let (mut server, client) = tls_pair().await;
     drop(client);
     // The client will spawn a task to complete the handshake and then go away
@@ -657,7 +669,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_crash() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_crash() -> TestResult {
     let (server, mut client) = tls_pair().await;
     let (mut tcp, _tls) = server.into_inner();
     tcp.shutdown().await?;
@@ -669,7 +682,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_crash_no_handshake() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_crash_no_handshake() -> TestResult {
     let (server, mut client) = tls_pair().await;
     let (mut tcp, _tls) = server.into_inner();
     tcp.shutdown().await?;
@@ -680,7 +694,8 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_server_crash_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn test_server_crash_after_handshake() -> TestResult {
     let (server, mut client) = tls_pair_handshake().await;
 
     let (mut tcp, _tls) = server.into_inner();
@@ -693,7 +708,8 @@ mod tests {
   }
 
   #[tokio::test(flavor = "current_thread")]
-  async fn large_transfer_with_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn large_transfer_with_shutdown() -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
@@ -719,7 +735,8 @@ mod tests {
   }
 
   #[tokio::test(flavor = "current_thread")]
-  async fn large_transfer_no_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+  #[ntest::timeout(60000)]
+  async fn large_transfer_no_shutdown() -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
