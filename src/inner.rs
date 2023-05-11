@@ -325,15 +325,15 @@ impl TlsStreamInner {
           let mut write = ImplementWriteTrait(&mut self.tcp);
           match self.tls.write_tls(&mut write) {
             Ok(n) => {
-              assert!(n > 0);
+              if n == 0 {
+                if !self.tcp.poll_write_ready(cx)?.is_pending() {
+                  continue;
+                }
+                return Poll::Pending;
+              }
               return Poll::Ready(Ok(false));
             }
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-              if !self.tcp.poll_write_ready(cx)?.is_pending() {
-                continue;
-              }
-              return Poll::Pending;
-            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => unreachable!(),
             Err(err) => return Poll::Ready(Err(err)),
           }
         }
@@ -372,15 +372,16 @@ impl TlsStreamInner {
         let mut write = ImplementWriteTrait(&mut self.tcp);
         match self.tls.write_tls(&mut write) {
           Ok(n) => {
-            assert!(n > 0);
+            // If we couldn't write anything, the output buffer is full.
+            if n == 0 {
+              if !self.tcp.poll_write_ready(cx)?.is_pending() {
+                continue;
+              }
+              return Poll::Pending;
+            }
             return Poll::Ready(Ok(false));
           }
-          Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            if !self.tcp.poll_write_ready(cx)?.is_pending() {
-              continue;
-            }
-            return Poll::Pending;
-          }
+          Err(err) if err.kind() == ErrorKind::WouldBlock => unreachable!(),
           Err(err) => return Poll::Ready(Err(err)),
         }
       }

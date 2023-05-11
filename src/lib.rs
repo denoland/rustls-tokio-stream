@@ -164,9 +164,7 @@ impl Drop for TlsStream {
       spawn(async move {
         // If we get Ok(true) or Err(..) from poll_close, abort the loop and let the TCP connection
         // drop.
-        while let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {
-
-        }
+        while let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {}
       });
     }
   }
@@ -691,6 +689,57 @@ mod tests {
 
     // Can't read -- server shut down. While it wasn't graceful, we should not get an error here.
     expect_eof_read(&mut client).await;
+    Ok(())
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn large_transfer_with_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
+
+    let (mut server, mut client) = tls_pair_handshake().await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![0; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      server.shutdown().await.unwrap();
+      drop(server);
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
+    Ok(())
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn large_transfer_no_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
+
+    let (mut server, mut client) = tls_pair_handshake().await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![0; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      drop(server);
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
     Ok(())
   }
 }
