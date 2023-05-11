@@ -303,9 +303,15 @@ impl TlsStreamInner {
     match self.poll_io(cx, Flow::Write) {
       Poll::Pending => return Poll::Pending,
       // If the socket connection is closed, treat as EOF rather than error
-      Poll::Ready(Err(err)) if err.kind() == ErrorKind::BrokenPipe => return Poll::Ready(Ok(())),
+      Poll::Ready(Err(err)) if err.kind() == ErrorKind::BrokenPipe => {
+        self.wr_state = State::TcpClosed;
+        self.rd_state = State::TcpClosed;
+      },
       // This is often seen on Windows, treat as EOF
-      Poll::Ready(Err(err)) if err.kind() == ErrorKind::ConnectionAborted => return Poll::Ready(Ok(())),
+      Poll::Ready(Err(err)) if err.kind() == ErrorKind::ConnectionAborted => {
+        self.wr_state = State::TcpClosed;
+        self.rd_state = State::TcpClosed;
+      },
       Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
       Poll::Ready(Ok(_)) => {},
     };
