@@ -8,6 +8,8 @@ use io::Error;
 use io::Read;
 use io::Write;
 use rustls::Connection;
+use std::backtrace;
+use std::backtrace::BacktraceStatus;
 use std::convert::From;
 use std::io;
 use std::io::ErrorKind;
@@ -32,11 +34,36 @@ pub(crate) enum State {
   TcpClosed,
 }
 
+#[inline(always)]
+fn trace_error(error: io::Error) -> io::Error {
+  #[cfg(debug_assertions)]
+  {
+    let backtrace = backtrace::Backtrace::capture();
+    if backtrace.status() == BacktraceStatus::Captured {
+      println!("{error:?} {backtrace}");
+    }
+  }
+  error
+}
+
+#[inline(always)]
+fn trace_poll_error<T>(poll: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
+  match poll {
+    Poll::Pending => Poll::Pending,
+    Poll::Ready(Ok(x)) => Poll::Ready(Ok(x)),
+    Poll::Ready(Err(err)) => Poll::Ready(Err(trace_error(err))),
+  }
+}
+
 struct ImplementReadTrait<'a, T>(&'a mut T);
 
 impl Read for ImplementReadTrait<'_, TcpStream> {
   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-    self.0.try_read(buf)
+    match self.0.try_read(buf) {
+      Ok(n) => Ok(n),
+      Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
+      Err(err) => Err(trace_error(err)),
+    }
   }
 }
 
@@ -47,7 +74,7 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
     match self.0.try_write(buf) {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(0),
-      Err(err) => Err(err),
+      Err(err) => Err(trace_error(err)),
     }
   }
 
@@ -88,11 +115,17 @@ impl TlsStreamInner {
           // shut down the underlying TCP socket. Otherwise, consider polling
           // done for the moment.
           State::TlsClosed if self.rd_state < State::TlsClosed => break true,
-          State::TlsClosed if Pin::new(&mut self.tcp).poll_shutdown(cx)?.is_pending() => {
-            break false;
-          }
           State::TlsClosed => {
-            self.wr_state = State::TcpClosed;
+            match Pin::new(&mut self.tcp).poll_shutdown(cx) {
+              Poll::Pending => break false,
+              Poll::Ready(Ok(_)) => self.wr_state = State::TcpClosed,
+              // The socket is occasionally in a NotConnected state because it's been terminated
+              // much earlier.
+              Poll::Ready(Err(err)) if err.kind() == ErrorKind::NotConnected => {
+                self.wr_state = State::TcpClosed
+              }
+              Poll::Ready(Err(err)) => return Poll::Ready(Err(trace_error(err))),
+            }
             continue;
           }
           State::TcpClosed => break true,
@@ -110,7 +143,7 @@ impl TlsStreamInner {
 
         // Poll whether there is space in the socket send buffer so we can flush
         // the remaining outgoing ciphertext.
-        if self.tcp.poll_write_ready(cx)?.is_pending() {
+        if trace_poll_error(self.tcp.poll_write_ready(cx))?.is_pending() {
           break false;
         }
       };
@@ -176,7 +209,7 @@ impl TlsStreamInner {
 
         // Get notified when more ciphertext becomes available to read from the
         // TCP socket.
-        if self.tcp.poll_read_ready(cx)?.is_pending() {
+        if trace_poll_error(self.tcp.poll_read_ready(cx))?.is_pending() {
           break false;
         }
       };
@@ -355,6 +388,6 @@ impl TlsStreamInner {
 
     self.rd_state = State::TcpClosed;
     self.wr_state = State::TcpClosed;
-    return Poll::Ready(Ok(true));
+    Poll::Ready(Ok(true))
   }
 }

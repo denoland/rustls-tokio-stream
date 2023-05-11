@@ -1,5 +1,8 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
+use crate::inner::Flow;
+use crate::inner::State;
+use crate::inner::TlsStreamInner;
 use futures::future::poll_fn;
 use futures::task::AtomicWaker;
 use futures::task::Context;
@@ -7,12 +10,6 @@ use futures::task::Poll;
 use futures::task::RawWaker;
 use futures::task::RawWakerVTable;
 use futures::task::Waker;
-use tokio::spawn;
-use tokio::task::spawn_blocking;
-
-use crate::inner::Flow;
-use crate::inner::State;
-use crate::inner::TlsStreamInner;
 use parking_lot::Mutex;
 use rustls::ClientConfig;
 use rustls::ClientConnection;
@@ -21,16 +18,15 @@ use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
 use std::io;
-use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Weak;
-use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
+use tokio::spawn;
 
 mod inner;
 
@@ -166,14 +162,10 @@ impl Drop for TlsStream {
     let tls = &inner.tls;
     if (tls.is_handshaking() && tls.wants_read()) || tls.wants_write() {
       spawn(async move {
-        loop {
-          // If we get Ok(true) or Err(..) from poll_close, abort the loop and let the TCP connection
-          // drop.
-          if let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {
-            continue;
-          } else {
-            break;
-          }
+        // If we get Ok(true) or Err(..) from poll_close, abort the loop and let the TCP connection
+        // drop.
+        while let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {
+
         }
       });
     }
@@ -472,6 +464,18 @@ mod tests {
     assert_eq!(e.expect_err("Expected error").kind(), kind);
   }
 
+  async fn expect_eof_read(stm: &mut TlsStream) {
+    let mut buf = [0_u8; 1];
+    let e = stm.read(&mut buf).await.expect("Expected no error");
+    assert_eq!(e, 0, "expected eof");
+  }
+
+  async fn expect_io_error_read(stm: &mut TlsStream, kind: io::ErrorKind) {
+    let mut buf = [0_u8; 1];
+    let e = stm.read(&mut buf).await.expect_err("Expected error");
+    assert_eq!(e.kind(), kind);
+  }
+
   #[tokio::test]
   async fn test_client_server() -> Result<(), Box<dyn std::error::Error>> {
     let (mut server, mut client) = tls_pair().await;
@@ -485,6 +489,44 @@ mod tests {
       client.write_all(b"hello!").await.unwrap();
       let mut buf = [0; 6];
       client.read_exact(&mut buf).await.unwrap();
+    });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_client_immediate_close() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut server, client) = tls_pair().await;
+    let a = spawn(async move {
+      server.shutdown().await.unwrap();
+      // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
+      // regular read.
+      expect_eof_read(&mut server).await;
+      drop(server);
+    });
+    let b = spawn(async move {
+      drop(client);
+    });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_immediate_close() -> Result<(), Box<dyn std::error::Error>> {
+    let (server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      drop(server);
+    });
+    let b = spawn(async move {
+      client.shutdown().await.unwrap();
+      // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
+      // regular read.
+      expect_eof_read(&mut client).await;
+      drop(client);
     });
     a.await?;
     b.await?;
@@ -543,8 +585,7 @@ mod tests {
       client.handshake().await.unwrap();
       rx.await.unwrap();
       // Can't read -- server shut down
-      let mut buf = [0; 10];
-      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+      expect_eof_read(&mut client).await;
     });
     a.await?;
     b.await?;
@@ -567,8 +608,7 @@ mod tests {
       drop(futures);
 
       // Can't read -- server shut down
-      let mut buf: [u8; 10] = [0; 10];
-      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+      expect_eof_read(&mut client).await;
     });
     a.await?;
 
@@ -582,8 +622,7 @@ mod tests {
     drop(server);
     client.handshake().await?;
     // Can't read -- server shut down (but it was graceful)
-    let mut buf: [u8; 10] = [0; 10];
-    assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+    expect_eof_read(&mut client).await;
     Ok(())
   }
 
@@ -592,8 +631,7 @@ mod tests {
     let (server, mut client) = tls_pair_handshake().await;
     drop(server);
     // Can't read -- server shut down (but it was graceful)
-    let mut buf: [u8; 10] = [0; 10];
-    assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+    expect_eof_read(&mut client).await;
     Ok(())
   }
 
@@ -616,8 +654,7 @@ mod tests {
     // The client will spawn a task to complete the handshake and then go away
     server.handshake().await?;
     // Can't read -- server shut down (but it was graceful)
-    let mut buf: [u8; 10] = [0; 10];
-    assert_eq!(server.read(&mut buf).await.unwrap(), 0);
+    expect_eof_read(&mut server).await;
     Ok(())
   }
 
@@ -629,32 +666,31 @@ mod tests {
 
     expect_io_error(client.handshake().await, ErrorKind::UnexpectedEof);
     // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
-    let mut buf: [u8; 10] = [0; 10];
-    expect_io_error(client.read(&mut buf).await, ErrorKind::UnexpectedEof);
+    expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_crash_no_handshake() -> Result<(), Box<dyn std::error::Error>> {
+    let (server, mut client) = tls_pair().await;
+    let (mut tcp, _tls) = server.into_inner();
+    tcp.shutdown().await?;
+
+    // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
+    expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
     Ok(())
   }
 
   #[tokio::test]
   async fn test_server_crash_after_handshake() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut server, mut client) = tls_pair().await;
-    let a = spawn(async move {
-      server.handshake().await.unwrap();
-      server
-    });
-    let b = spawn(async move {
-      client.handshake().await.unwrap();
-      client
-    });
+    let (server, mut client) = tls_pair_handshake().await;
 
-    let server = a.await?;
-    let mut client = b.await?;
     let (mut tcp, _tls) = server.into_inner();
     tcp.shutdown().await?;
     drop(tcp);
 
     // Can't read -- server shut down. While it wasn't graceful, we should not get an error here.
-    let mut buf: [u8; 10] = [0; 10];
-    assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+    expect_eof_read(&mut client).await;
     Ok(())
   }
 }
