@@ -645,8 +645,7 @@ mod tests {
 
   #[tokio::test]
   #[ntest::timeout(60000)]
-  async fn test_server_dropped_after_handshake_with_write() -> TestResult
-  {
+  async fn test_server_dropped_after_handshake_with_write() -> TestResult {
     let (mut server, mut client) = tls_pair_handshake().await;
     server.write_all(b"XYZ").await.unwrap();
     drop(server);

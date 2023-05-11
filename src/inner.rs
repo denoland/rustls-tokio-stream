@@ -95,12 +95,7 @@ pub struct TlsStreamInner {
 impl TlsStreamInner {
   pub(crate) fn poll_io(&mut self, cx: &mut Context<'_>, flow: Flow) -> Poll<io::Result<()>> {
     loop {
-      // if self.wr_state == State::TcpClosed && self.rd_state == State::TcpClosed {
-      //   return Poll::Ready(Ok(()));
-      // }
-      // println!("loop {:?} {:?} {}", self.rd_state, self.wr_state, self.tls.is_handshaking());
       let wr_ready = loop {
-      // println!("write {:?} {:?} {}", self.rd_state, self.wr_state, self.tls.is_handshaking());
         match self.wr_state {
           _ if self.tls.is_handshaking() && !self.tls.wants_write() => {
             break true;
@@ -150,14 +145,14 @@ impl TlsStreamInner {
               self.wr_state = State::TcpClosed;
             }
             continue;
-          },
+          }
           // This is often seen on Windows, treat as EOF
           Err(err) if err.kind() == ErrorKind::ConnectionAborted => {
             if self.wr_state < State::TcpClosed {
               self.wr_state = State::TcpClosed;
             }
             continue;
-          },
+          }
           Err(err) if err.kind() == ErrorKind::WouldBlock => unreachable!(),
           Err(err) => return Poll::Ready(Err(err)),
         }
@@ -234,6 +229,10 @@ impl TlsStreamInner {
           break false;
         }
       };
+
+      if self.rd_state == State::TcpClosed && self.wr_state == State::TcpClosed {
+        return Poll::Ready(Ok(()));
+      }
 
       if wr_ready {
         if self.rd_state >= State::TlsClosed
@@ -324,7 +323,7 @@ impl TlsStreamInner {
     match self.poll_io(cx, Flow::Write) {
       Poll::Pending => return Poll::Pending,
       Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-      Poll::Ready(Ok(_)) => {},
+      Poll::Ready(Ok(_)) => {}
     };
 
     // At minimum, a TLS 'CloseNotify' alert should have been sent.
