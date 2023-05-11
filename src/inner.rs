@@ -73,6 +73,8 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     match self.0.try_write(buf) {
       Ok(n) => Ok(n),
+      Err(err) if err.kind() == ErrorKind::BrokenPipe => Err(err),
+      Err(err) if err.kind() == ErrorKind::ConnectionAborted => Err(err),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(0),
       Err(err) => Err(trace_error(err)),
     }
@@ -93,7 +95,12 @@ pub struct TlsStreamInner {
 impl TlsStreamInner {
   pub(crate) fn poll_io(&mut self, cx: &mut Context<'_>, flow: Flow) -> Poll<io::Result<()>> {
     loop {
+      // if self.wr_state == State::TcpClosed && self.rd_state == State::TcpClosed {
+      //   return Poll::Ready(Ok(()));
+      // }
+      // println!("loop {:?} {:?} {}", self.rd_state, self.wr_state, self.tls.is_handshaking());
       let wr_ready = loop {
+      // println!("write {:?} {:?} {}", self.rd_state, self.wr_state, self.tls.is_handshaking());
         match self.wr_state {
           _ if self.tls.is_handshaking() && !self.tls.wants_write() => {
             break true;
@@ -137,6 +144,20 @@ impl TlsStreamInner {
         match self.tls.write_tls(&mut wrapped_tcp) {
           Ok(0) => {}        // Wait until the socket has enough buffer space.
           Ok(_) => continue, // Try to send more more data immediately.
+          // If the socket connection is closed, treat as EOF rather than error
+          Err(err) if err.kind() == ErrorKind::BrokenPipe => {
+            if self.wr_state < State::TcpClosed {
+              self.wr_state = State::TcpClosed;
+            }
+            continue;
+          },
+          // This is often seen on Windows, treat as EOF
+          Err(err) if err.kind() == ErrorKind::ConnectionAborted => {
+            if self.wr_state < State::TcpClosed {
+              self.wr_state = State::TcpClosed;
+            }
+            continue;
+          },
           Err(err) if err.kind() == ErrorKind::WouldBlock => unreachable!(),
           Err(err) => return Poll::Ready(Err(err)),
         }
@@ -251,11 +272,6 @@ impl TlsStreamInner {
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
-    // If the stream is closed, reads return immediately
-    if self.rd_state == State::TcpClosed {
-      return Poll::Ready(Ok(()))
-    }
-
     ready!(self.poll_io(cx, Flow::Read))?;
 
     if self.rd_state == State::StreamOpen {
@@ -307,16 +323,6 @@ impl TlsStreamInner {
 
     match self.poll_io(cx, Flow::Write) {
       Poll::Pending => return Poll::Pending,
-      // If the socket connection is closed, treat as EOF rather than error
-      Poll::Ready(Err(err)) if err.kind() == ErrorKind::BrokenPipe => {
-        self.wr_state = State::TcpClosed;
-        self.rd_state = State::TcpClosed;
-      },
-      // This is often seen on Windows, treat as EOF
-      Poll::Ready(Err(err)) if err.kind() == ErrorKind::ConnectionAborted => {
-        self.wr_state = State::TcpClosed;
-        self.rd_state = State::TcpClosed;
-      },
       Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
       Poll::Ready(Ok(_)) => {},
     };
