@@ -764,4 +764,38 @@ mod tests {
     b.await?;
     Ok(())
   }
+
+  #[tokio::test(flavor = "current_thread")]
+  #[ntest::timeout(60000)]
+  async fn large_transfer_drop_socket_after_flush() -> TestResult {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
+
+    let (mut server, mut client) = tls_pair_handshake().await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      server.shutdown().await.unwrap();
+      let (mut tcp, _tls) = server.into_inner();
+      tcp.shutdown().await.unwrap();
+      drop(tcp);
+    });
+    let b = spawn(async move {
+      for i in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(
+          BUF_SIZE,
+          client
+            .read_exact(&mut buf)
+            .await
+            .expect(&format!("After reading {i} packets"))
+        );
+      }
+    });
+    a.await?;
+    b.await?;
+    Ok(())
+  }
 }
