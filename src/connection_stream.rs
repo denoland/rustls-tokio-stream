@@ -52,6 +52,14 @@ impl ConnectionStream {
       .unwrap_or_default()
   }
 
+  fn tls_bytes_to_write(&self) -> usize {
+    self
+      .last_iostate
+      .as_ref()
+      .map(|iostate| iostate.tls_bytes_to_write())
+      .unwrap_or_default()
+  }
+
   fn poll_read_only(&mut self, cx: &mut Context<'_>) -> StreamProgress {
     if self.rd_error.is_some() || self.rd_proto_error.is_some() {
       StreamProgress::Error
@@ -100,6 +108,7 @@ impl ConnectionStream {
       StreamProgress::Error
     } else if self.tls.wants_write() {
       loop {
+        debug_assert!(self.tls.wants_write());
         match write_tls(&mut self.tcp, &mut self.tls) {
           Ok(n) => {
             assert!(n > 0);
@@ -246,6 +255,19 @@ impl ConnectionStream {
 
     res
   }
+
+  /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
+  /// reads at all.
+  fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    loop {
+      match self.poll_write_only(cx) {
+        StreamProgress::RegisteredWaker => break Poll::Pending,
+        StreamProgress::MadeProgress => continue,
+        StreamProgress::NoInterest => break Poll::Ready(Ok(())),
+        StreamProgress::Error => break Poll::Ready(Err(self.wr_error.unwrap().into())),
+      }
+    }
+  }
 }
 
 #[cfg(test)]
@@ -257,6 +279,7 @@ mod tests {
   use crate::tests::server_name;
   use crate::tests::TestResult;
   use futures::future::poll_fn;
+  use futures::task::noop_waker_ref;
   use rustls::ClientConnection;
   use rustls::ServerConnection;
   use std::time::Duration;
@@ -265,6 +288,15 @@ mod tests {
 
   async fn expect_write_1(mut conn: &mut ConnectionStream) {
     assert_eq!(poll_fn(|cx| conn.poll_write(cx, b"x")).await.unwrap(), 1);
+  }
+
+  async fn wait_for_peek(mut conn: &mut ConnectionStream) {
+    loop {
+      let mut buf = [0; 1];
+      if conn.tcp.peek(&mut buf).await.unwrap() == 1 {
+        return;
+      }
+    }
   }
 
   async fn expect_read_1(mut conn: &mut ConnectionStream) {
@@ -340,6 +372,7 @@ mod tests {
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     expect_write_1(&mut client).await;
+    wait_for_peek(&mut server).await;
 
     // Abortive close
     client.tcp.set_linger(Some(Duration::default()))?;
@@ -401,6 +434,7 @@ mod tests {
   async fn test_connection_stream_bad_data_2() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     expect_write_1(&mut client).await;
+    wait_for_peek(&mut server).await;
 
     // This forces the server to read as well, buffering the single valid packet
     assert_eq!(server.plaintext_bytes_to_read(), 0);
@@ -417,6 +451,43 @@ mod tests {
 
     // The next byte will not
     expect_read_1_err(&mut server, ErrorKind::InvalidData).await;
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_connection_flush() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    let buf = [0x42; 1024];
+    let mut cx = Context::from_waker(noop_waker_ref());
+
+    // Write as much as we can to the socket until poll starts returning Pending
+    let mut total = 0;
+    while let Poll::Ready(n) = 
+      server.poll_write(&mut cx, buf.as_slice()) {
+        total += n.unwrap();
+    }
+
+    server.tls.writer().write(b"final")?;
+    let iostate = server.tls.process_new_packets().unwrap();
+
+    assert!(iostate.tls_bytes_to_write() > 0);
+
+    // We can't make progress
+    assert!(server.poll_flush(&mut cx).is_pending());
+
+    // Read half of what we wrote
+    let mut buf = [0; 1024];
+    let mut total_read = 0;
+    while total_read < total / 2 {
+      let mut read_buf = ReadBuf::new(&mut buf);
+      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf)).await.unwrap();
+    }
+
+    // Now we can flush
+    poll_fn(|cx| server.poll_flush(cx)).await.unwrap();
+    let iostate = server.tls.process_new_packets().unwrap();
+    assert!(iostate.tls_bytes_to_write() == 0);
 
     Ok(())
   }

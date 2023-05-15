@@ -47,7 +47,7 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     match self.0.try_write(buf) {
       Ok(n) => Ok(n),
-      Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(0),
+      Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
       Err(err) => Err(trace_error(err)),
     }
   }
