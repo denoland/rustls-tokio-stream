@@ -371,6 +371,8 @@ mod tests {
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
+    // We're testing aborts, so set NODELAY on the socket
+    client.tcp.set_nodelay(true).unwrap();
     expect_write_1(&mut client).await;
     wait_for_peek(&mut server).await;
 
