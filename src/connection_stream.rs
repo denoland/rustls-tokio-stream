@@ -299,6 +299,16 @@ mod tests {
     }
   }
 
+  async fn wait_for_peek_n<const N: usize>(mut conn: &mut ConnectionStream) {
+    loop {
+      let mut buf = [0; N];
+      if conn.tcp.peek(&mut buf).await.unwrap() == N {
+        return;
+      }
+      tokio::time::sleep(Duration::from_millis(1));
+    }
+  }
+
   async fn expect_read_1(mut conn: &mut ConnectionStream) {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
@@ -371,10 +381,13 @@ mod tests {
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
+    println!("1");
     // We're testing aborts, so set NODELAY on the socket
     client.tcp.set_nodelay(true).unwrap();
+    println!("2");
     expect_write_1(&mut client).await;
-    wait_for_peek(&mut server).await;
+    println!("3");
+    wait_for_peek_n::<23>(&mut server).await;
 
     // Abortive close
     client.tcp.set_linger(Some(Duration::default()))?;
