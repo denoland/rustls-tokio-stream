@@ -1,6 +1,7 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
 use futures::ready;
+use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
 
@@ -17,6 +18,42 @@ use std::pin::Pin;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
+
+enum TcpState {
+  Open,
+  Eof,
+  TcpError(io::ErrorKind),
+  TlsError(io::ErrorKind),
+}
+
+/// The connection is in the handshake stage and is buffering writes. Reads cannot proceed in this state.
+/// Should the connection receive a read or write error in this state, it moves into the error state.
+struct Handshaking {
+  pub(crate) conn: ConnectionStream,
+  pub(crate) rd_state: TcpState,
+  pub(crate) wr_state: TcpState,
+  pub read_waker: AtomicWaker,
+}
+
+impl Handshaking {
+  /// When handshaking, writes always succeed.
+  pub(crate) fn poll_write(&mut self, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    // self.poll_io(cx, flow)
+    assert!(self.conn.tls.is_handshaking());
+    self.conn.tls.writer().write_all(buf);
+    Poll::Ready(Ok(buf.len()))
+  }
+
+  /// When handshaking, reads always return pending.
+  pub(crate) fn poll_read(
+    &mut self,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<usize>> {
+    self.read_waker.register(cx.waker());
+    Poll::Pending
+  }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Flow {
@@ -233,6 +270,7 @@ impl TlsStreamInner {
             // channel and we haven't fully read everything out of the plaintext buffer. In either
             // case we're just going to keep looping rather than changing the state as we cannot
             // don't current have a state for "tcp shut down but tls still open".
+            self.rd_state = State::TcpClosed;
             continue;
           }
           Err(err) => return Poll::Ready(Err(err)),
@@ -351,6 +389,10 @@ impl TlsStreamInner {
     assert!(self.rd_state < State::TlsClosed || self.wr_state == State::TcpClosed);
 
     Poll::Ready(Ok(()))
+  }
+
+  pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    self.poll_io(cx, Flow::Write)
   }
 
   pub(crate) fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<bool>> {
