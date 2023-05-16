@@ -4,6 +4,7 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
+use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 use tokio::io::ReadBuf;
@@ -16,6 +17,7 @@ struct ConnectionStream {
   tls: Connection,
   tcp: TcpStream,
   last_iostate: Option<IoState>,
+  close_sent: bool,
   /// An error on the TLS read protocol stream.
   rd_proto_error: Option<rustls::Error>,
   /// An error on the underlying socket's read side.
@@ -37,6 +39,7 @@ impl ConnectionStream {
     Self {
       tls,
       tcp,
+      close_sent: false,
       last_iostate: None,
       rd_proto_error: None,
       rd_error: None,
@@ -268,6 +271,18 @@ impl ConnectionStream {
       }
     }
   }
+
+  /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
+  /// reads at all.
+  fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    if !self.close_sent {
+      ready!(self.poll_flush(cx))?;
+      self.tls.send_close_notify();
+      self.close_sent = true;
+    }
+    ready!(self.poll_flush(cx))?;
+    Poll::Ready(Ok(()))
+  }
 }
 
 #[cfg(test)]
@@ -277,14 +292,14 @@ mod tests {
   use crate::tests::client_config;
   use crate::tests::server_config;
   use crate::tests::server_name;
+  use crate::tests::tcp_pair;
   use crate::tests::TestResult;
-use crate::tests::tcp_pair;
   use futures::future::poll_fn;
   use futures::task::noop_waker_ref;
   use rustls::ClientConnection;
   use rustls::ServerConnection;
-use tokio::io::AsyncReadExt;
   use std::time::Duration;
+  use tokio::io::AsyncReadExt;
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
 
@@ -381,7 +396,7 @@ use tokio::io::AsyncReadExt;
 
   /// Dirty close (abort). This doesn't pass on Windows because the read appears to send the
   /// connection reset error rather than any socket contents.
-  #[cfg(not(target_os="windows"))]
+  #[cfg(not(target_os = "windows"))]
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
@@ -406,7 +421,7 @@ use tokio::io::AsyncReadExt;
 
   /// Associated test for [`test_connection_stream_dirty_close_abort`]. If this test fails,
   /// the OS in question throws away unreceived data on reset.
-  #[cfg(not(target_os="windows"))]
+  #[cfg(not(target_os = "windows"))]
   #[tokio::test]
   async fn test_tcp_abort() -> TestResult {
     let (mut server, mut client) = tcp_pair().await;
@@ -420,8 +435,10 @@ use tokio::io::AsyncReadExt;
 
     let mut buf = [0; 19000];
     server.try_read(buf.as_mut_slice()).unwrap();
-    server.try_read(buf.as_mut_slice()).expect_err("expected reset");
-   
+    server
+      .try_read(buf.as_mut_slice())
+      .expect_err("expected reset");
+
     Ok(())
   }
 
@@ -502,9 +519,8 @@ use tokio::io::AsyncReadExt;
 
     // Write as much as we can to the socket until poll starts returning Pending
     let mut total = 0;
-    while let Poll::Ready(n) = 
-      server.poll_write(&mut cx, buf.as_slice()) {
-        total += n.unwrap();
+    while let Poll::Ready(n) = server.poll_write(&mut cx, buf.as_slice()) {
+      total += n.unwrap();
     }
 
     server.tls.writer().write(b"final")?;
@@ -520,13 +536,66 @@ use tokio::io::AsyncReadExt;
     let mut total_read = 0;
     while total_read < total / 2 {
       let mut read_buf = ReadBuf::new(&mut buf);
-      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf)).await.unwrap();
+      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+        .await
+        .unwrap();
     }
 
     // Now we can flush
     poll_fn(|cx| server.poll_flush(cx)).await.unwrap();
     let iostate = server.tls.process_new_packets().unwrap();
     assert!(iostate.tls_bytes_to_write() == 0);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_connection_clean_close() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    let buf = [0x42; 1024];
+    let mut cx = Context::from_waker(noop_waker_ref());
+
+    // Write as much as we can to the socket until poll starts returning Pending
+    let mut total = 0;
+    while let Poll::Ready(n) = server.poll_write(&mut cx, buf.as_slice()) {
+      total += n.unwrap();
+    }
+
+    server.tls.writer().write(b"final")?;
+    let iostate = server.tls.process_new_packets().unwrap();
+
+    assert!(iostate.tls_bytes_to_write() > 0);
+
+    // We can't make progress
+    assert!(server.poll_shutdown(&mut cx).is_pending());
+
+    // Read half of what we wrote
+    let mut buf = [0; 1024];
+    let mut total_read = 0;
+    while total_read < total / 2 {
+      let mut read_buf = ReadBuf::new(&mut buf);
+      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+        .await
+        .unwrap();
+    }
+
+    // Now we can shutdown
+    poll_fn(|cx| server.poll_shutdown(cx)).await.unwrap();
+    let iostate = server.tls.process_new_packets().unwrap();
+    assert!(iostate.tls_bytes_to_write() == 0);
+
+    loop {
+      let mut read_buf = ReadBuf::new(&mut buf);
+      let n = poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+        .await
+        .unwrap();
+      total_read += n;
+      if n == 0 {
+        // 5 extra from the "final" packet
+        assert_eq!(total_read, total + 5);
+        break;
+      }
+    }
 
     Ok(())
   }
