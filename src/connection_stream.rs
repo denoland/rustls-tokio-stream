@@ -305,7 +305,7 @@ mod tests {
       if conn.tcp.peek(&mut buf).await.unwrap() == N {
         return;
       }
-      tokio::time::sleep(Duration::from_millis(1));
+      tokio::time::sleep(Duration::from_millis(1)).await;
     }
   }
 

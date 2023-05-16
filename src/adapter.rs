@@ -34,7 +34,7 @@ pub struct ImplementReadTrait<'a, T>(pub &'a mut T);
 impl Read for ImplementReadTrait<'_, TcpStream> {
   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
     let res = self.0.try_read(buf);
-    println!("r={:?}", res);
+    println!("r({})={:?}", buf.len(), res);
     match res {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
