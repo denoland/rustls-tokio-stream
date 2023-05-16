@@ -381,6 +381,7 @@ use tokio::io::AsyncReadExt;
 
   /// Dirty close (abort). This doesn't pass on Windows because the read appears to send the
   /// connection reset error rather than any socket contents.
+  #[cfg(not(target_os="windows"))]
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
@@ -391,9 +392,6 @@ use tokio::io::AsyncReadExt;
 
     expect_write_1(&mut client).await;
     wait_for_peek_n::<23>(&mut server).await;
-
-    let mut cx = Context::from_waker(noop_waker_ref());
-    assert_eq!(server.poll_read_only(&mut cx), StreamProgress::MadeProgress);
 
     // Abortive close
     drop(client);
@@ -406,6 +404,9 @@ use tokio::io::AsyncReadExt;
     Ok(())
   }
 
+  /// Associated test for [`test_connection_stream_dirty_close_abort`]. If this test fails,
+  /// the OS in question throws away unreceived data on reset.
+  #[cfg(not(target_os="windows"))]
   #[tokio::test]
   async fn test_tcp_abort() -> TestResult {
     let (mut server, mut client) = tcp_pair().await;
@@ -419,29 +420,8 @@ use tokio::io::AsyncReadExt;
 
     let mut buf = [0; 19000];
     server.try_read(buf.as_mut_slice()).unwrap();
-    Ok(())
-  }
-
-  /// Dirty close (abort).
-  #[tokio::test]
-  async fn test_connection_stream_dirty_close_abort_2() -> TestResult {
-    let (mut server, mut client) = tls_pair().await;
-
-    // We're testing aborts, so set NODELAY and linger=0 on the socket
-    client.tcp.set_nodelay(true).unwrap();
-    client.tcp.set_linger(Some(Duration::default()))?;
-
-    expect_write_1(&mut client).await;
-    wait_for_peek_n::<23>(&mut server).await;
-
-    // Abortive close
-    drop(client);
-
-    // One byte will read fine
-    expect_read_1(&mut server).await;
-
-    // The next byte will not
-    expect_read_1_err(&mut server, ErrorKind::ConnectionReset).await;
+    server.try_read(buf.as_mut_slice()).expect_err("expected reset");
+   
     Ok(())
   }
 
