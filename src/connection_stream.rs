@@ -24,7 +24,7 @@ struct ConnectionStream {
   wr_error: Option<io::ErrorKind>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum StreamProgress {
   NoInterest,
   RegisteredWaker,
@@ -377,22 +377,43 @@ mod tests {
     Ok(())
   }
 
-  /// Dirty close (abort).
+  /// Dirty close (abort). This doesn't pass on Windows because the read appears to send the
+  /// connection reset error rather than any socket contents.
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
 
-    let mut cx = Context::from_waker(noop_waker_ref());
-    while server.poll_read_only(&mut cx) == StreamProgress::MadeProgress {}
-
-    println!("1");
-    // We're testing aborts, so set NODELAY on the socket
+    // We're testing aborts, so set NODELAY and linger=0 on the socket
     client.tcp.set_nodelay(true).unwrap();
     client.tcp.set_linger(Some(Duration::default()))?;
 
-    println!("2");
     expect_write_1(&mut client).await;
-    println!("3");
+    wait_for_peek_n::<23>(&mut server).await;
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+    assert_eq!(server.poll_read_only(&mut cx), StreamProgress::MadeProgress);
+
+    // Abortive close
+    drop(client);
+
+    // One byte will read fine
+    expect_read_1(&mut server).await;
+
+    // The next byte will not
+    expect_read_1_err(&mut server, ErrorKind::ConnectionReset).await;
+    Ok(())
+  }
+
+  /// Dirty close (abort).
+  #[tokio::test]
+  async fn test_connection_stream_dirty_close_abort_2() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+
+    // We're testing aborts, so set NODELAY and linger=0 on the socket
+    client.tcp.set_nodelay(true).unwrap();
+    client.tcp.set_linger(Some(Duration::default()))?;
+
+    expect_write_1(&mut client).await;
     wait_for_peek_n::<23>(&mut server).await;
 
     // Abortive close
