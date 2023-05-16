@@ -381,16 +381,21 @@ mod tests {
   #[tokio::test]
   async fn test_connection_stream_dirty_close_abort() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
+
+    let mut cx = Context::from_waker(noop_waker_ref());
+    while server.poll_read_only(&mut cx) == StreamProgress::MadeProgress {}
+
     println!("1");
     // We're testing aborts, so set NODELAY on the socket
     client.tcp.set_nodelay(true).unwrap();
+    client.tcp.set_linger(Some(Duration::default()))?;
+
     println!("2");
     expect_write_1(&mut client).await;
     println!("3");
     wait_for_peek_n::<23>(&mut server).await;
 
     // Abortive close
-    client.tcp.set_linger(Some(Duration::default()))?;
     drop(client);
 
     // One byte will read fine
