@@ -278,10 +278,12 @@ mod tests {
   use crate::tests::server_config;
   use crate::tests::server_name;
   use crate::tests::TestResult;
+use crate::tests::tcp_pair;
   use futures::future::poll_fn;
   use futures::task::noop_waker_ref;
   use rustls::ClientConnection;
   use rustls::ServerConnection;
+use tokio::io::AsyncReadExt;
   use std::time::Duration;
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
@@ -401,6 +403,22 @@ mod tests {
 
     // The next byte will not
     expect_read_1_err(&mut server, ErrorKind::ConnectionReset).await;
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_tcp_abort() -> TestResult {
+    let (mut server, mut client) = tcp_pair().await;
+    client.set_nodelay(true).unwrap();
+    client.set_linger(Some(Duration::default())).unwrap();
+    client.write_u8(0).await;
+    client.flush().await;
+    drop(client);
+
+    server.readable().await.unwrap();
+
+    let mut buf = [0; 19000];
+    server.try_read(buf.as_mut_slice()).unwrap();
     Ok(())
   }
 
