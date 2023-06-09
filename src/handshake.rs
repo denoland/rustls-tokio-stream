@@ -99,10 +99,13 @@ mod tests {
         .into();
     let server = spawn(handshake_task(server, tls_server));
     let client = spawn(handshake_task(client, tls_client));
-    let (_, tls_client) = client.await.unwrap().unwrap();
-    let (_, tls_server) = server.await.unwrap().unwrap();
+    let (tcp_client, tls_client) = client.await.unwrap().unwrap();
+    let (tcp_server, tls_server) = server.await.unwrap().unwrap();
     assert!(!tls_client.is_handshaking());
     assert!(!tls_server.is_handshaking());
+    // Don't let these drop until the handshake finishes on both sides
+    drop(tcp_client);
+    drop(tcp_server);
     Ok(())
   }
 }
