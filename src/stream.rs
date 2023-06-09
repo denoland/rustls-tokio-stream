@@ -1005,10 +1005,11 @@ mod tests {
   #[tokio::test]
   async fn test_server_half_crash_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_with_tcp_server().await;
-    server.shutdown().await?;
+    // This test occasionally shows up as ConnectionReset on Mac -- the delay ensures we wait long enough
+    // for the handshake to settle.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    server.shutdown().await?;
 
-    // This occasionally shows up as ConnectionReset on Mac
     let expected = ErrorKind::UnexpectedEof;
 
     expect_io_error(client.handshake().await, expected);
