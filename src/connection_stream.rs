@@ -355,7 +355,7 @@ mod tests {
   use rustls::ClientConnection;
   use rustls::ServerConnection;
   use std::time::Duration;
-  
+
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
 
@@ -393,10 +393,7 @@ mod tests {
     );
   }
 
-  async fn expect_read_1_err(
-    conn: &mut ConnectionStream,
-    error: ErrorKind,
-  ) {
+  async fn expect_read_1_err(conn: &mut ConnectionStream, error: ErrorKind) {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
     let err = poll_fn(|cx| conn.poll_read(cx, &mut read_buf))
@@ -509,8 +506,8 @@ mod tests {
     let (server, mut client) = tcp_pair().await;
     client.set_nodelay(true).unwrap();
     client.set_linger(Some(Duration::default())).unwrap();
-    client.write_u8(0).await;
-    client.flush().await;
+    client.write_u8(0).await.unwrap();
+    client.flush().await.unwrap();
     drop(client);
 
     server.readable().await.unwrap();

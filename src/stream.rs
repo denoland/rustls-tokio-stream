@@ -488,7 +488,7 @@ mod tests {
   use tokio::io::AsyncWriteExt;
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
-  
+
   use tokio::spawn;
 
   type TestResult = Result<(), std::io::Error>;
@@ -1006,10 +1006,14 @@ mod tests {
   async fn test_server_half_crash_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_with_tcp_server().await;
     server.shutdown().await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    expect_io_error(client.handshake().await, ErrorKind::UnexpectedEof);
+    // This occasionally shows up as ConnectionReset on Mac
+    let expected = ErrorKind::UnexpectedEof;
+
+    expect_io_error(client.handshake().await, expected);
     // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
-    expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
+    expect_io_error_read(&mut client, expected).await;
     Ok(())
   }
 
