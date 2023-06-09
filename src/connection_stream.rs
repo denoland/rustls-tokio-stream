@@ -278,7 +278,7 @@ impl ConnectionStream {
 
   /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
   /// reads at all.
-  fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+  pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     loop {
       match self.poll_write_only(cx) {
         StreamProgress::RegisteredWaker => break Poll::Pending,
@@ -293,7 +293,10 @@ impl ConnectionStream {
 
   /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
   /// reads at all.
-  fn poll_shutdown(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+  pub fn poll_shutdown(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<io::Result<()>> {
     if !self.close_sent {
       ready!(self.poll_flush(cx))?;
       self.tls.send_close_notify();

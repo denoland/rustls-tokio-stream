@@ -243,7 +243,8 @@ impl AsyncRead for TlsStream {
           }
         }
         TlsStreamState::Closed => {
-          return Poll::Ready(Err(io::ErrorKind::NotConnected.into()))
+          // TODO(mmastrac): Should we differentiate between failed and non-failed close?
+          return Poll::Ready(Ok(()));
         }
       }
     }
@@ -273,17 +274,33 @@ impl AsyncWrite for TlsStream {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
-    // self.inner_mut().poll_io(cx, Flow::Write)
-    // The underlying TCP stream does not need to be flushed.
-    unimplemented!()
+    match &mut self.state {
+      TlsStreamState::Handshaking(..) => Poll::Ready(Ok(())),
+      TlsStreamState::Closed => {
+        Poll::Ready(Err(ErrorKind::NotConnected.into()))
+      }
+      TlsStreamState::Open(stm) => stm.poll_flush(cx),
+    }
   }
 
   fn poll_shutdown(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
-    // self.inner_mut().poll_shutdown(cx)
-    unimplemented!()
+    match &mut self.state {
+      // Handshaking: drop the handshake and return ready.
+      TlsStreamState::Handshaking(..) => {
+        self.state = TlsStreamState::Closed;
+        Poll::Ready(Ok(()))
+      }
+      TlsStreamState::Open(stm) => {
+        let res = ready!(stm.poll_shutdown(cx));
+        self.state = TlsStreamState::Closed;
+        Poll::Ready(res)
+      }
+      // Closed: return ready.
+      TlsStreamState::Closed => Poll::Ready(Ok(())),
+    }
   }
 }
 
@@ -533,25 +550,25 @@ mod tests {
     Ok(())
   }
 
-  // #[tokio::test]
-  // #[ntest::timeout(60000)]
-  // async fn test_client_immediate_close() -> TestResult {
-  //   let (mut server, client) = tls_pair().await;
-  //   let a = spawn(async move {
-  //     server.shutdown().await.unwrap();
-  //     // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
-  //     // regular read.
-  //     expect_eof_read(&mut server).await;
-  //     drop(server);
-  //   });
-  //   let b = spawn(async move {
-  //     drop(client);
-  //   });
-  //   a.await?;
-  //   b.await?;
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_client_immediate_close() -> TestResult {
+    let (mut server, client) = tls_pair().await;
+    let a = spawn(async move {
+      server.shutdown().await.unwrap();
+      // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
+      // regular read.
+      expect_eof_read(&mut server).await;
+      drop(server);
+    });
+    let b = spawn(async move {
+      drop(client);
+    });
+    a.await?;
+    b.await?;
 
-  //   Ok(())
-  // }
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]
