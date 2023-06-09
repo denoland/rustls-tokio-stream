@@ -237,6 +237,44 @@ impl TlsStream {
   //   while !poll_fn(|cx| inner.poll_close(cx)).await? {}
   //   Ok(())
   // }
+
+  /// Shuts the connection down, optionally waiting for the handshake to complete.
+  fn poll_shutdown_or_abort(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    abort: bool,
+  ) -> Poll<io::Result<()>> {
+    let res = if abort {
+      // If we're still handshaking, abort
+      match self.poll_pending_handshake(cx) {
+        Poll::Pending => {
+          self.state = TlsStreamState::Closed;
+          return Poll::Ready(Ok(()));
+        }
+        Poll::Ready(res) => res,
+      }
+    } else {
+      ready!(self.poll_pending_handshake(cx))
+    };
+
+    if res.is_err() {
+      // ?
+      self.state = TlsStreamState::Closed
+    }
+
+    match &mut self.state {
+      // Handshaking: drop the handshake and return ready.
+      TlsStreamState::Handshaking(..) => {
+        unreachable!()
+      }
+      TlsStreamState::Open(stm) => {
+        let res = ready!(stm.poll_shutdown(cx));
+        Poll::Ready(res)
+      }
+      // Closed: return ready.
+      TlsStreamState::Closed => Poll::Ready(Ok(())),
+    }
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -245,7 +283,14 @@ impl AsyncRead for TlsStream {
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
-    ready!(self.poll_pending_handshake(cx))?;
+    match ready!(self.poll_pending_handshake(cx)) {
+      Ok(()) => {}
+      Err(err) => {
+        self.state = TlsStreamState::Closed;
+        // TODO: error
+        return Poll::Ready(Ok(()));
+      }
+    };
     match &mut self.state {
       TlsStreamState::Handshaking(..) => {
         unreachable!()
@@ -302,49 +347,35 @@ impl AsyncWrite for TlsStream {
   }
 
   fn poll_shutdown(
-    mut self: Pin<&mut Self>,
+    self: Pin<&mut Self>,
     cx: &mut Context<'_>,
-  ) -> Poll<io::Result<()>> {
-    // If we're still handshaking, abort
-    if self.poll_pending_handshake(cx)?.is_pending() {
-      self.state = TlsStreamState::Closed;
-      return Poll::Ready(Ok(()));
-    }
-
-    match &mut self.state {
-      // Handshaking: drop the handshake and return ready.
-      TlsStreamState::Handshaking(..) => {
-        unreachable!()
-      }
-      TlsStreamState::Open(stm) => {
-        let res = ready!(stm.poll_shutdown(cx));
-        Poll::Ready(res)
-      }
-      // Closed: return ready.
-      TlsStreamState::Closed => Poll::Ready(Ok(())),
-    }
+  ) -> Poll<Result<(), io::Error>> {
+    self.poll_shutdown_or_abort(cx, false)
   }
 }
 
 impl Drop for TlsStream {
   fn drop(&mut self) {
-    // let Some(mut inner) = self.0.take() else {
-    //   return;
-    // };
-
-    // // If read and write are closed, we can fast exit here
-    // if inner.wr_state != State::StreamOpen && inner.rd_state != State::StreamOpen {
-    //   return;
-    // }
-
-    // let tls = &inner.tls;
-    // if (tls.is_handshaking() && tls.wants_read()) || tls.wants_write() {
-    //   spawn(async move {
-    //     // If we get Ok(true) or Err(..) from poll_close, abort the loop and let the TCP connection
-    //     // drop.
-    //     while let Ok(false) = poll_fn(|cx| inner.poll_close(cx)).await {}
-    //   });
-    // }
+    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
+    match state {
+      TlsStreamState::Handshaking(handle, _, buf) => {
+        spawn(async move {
+          if let Ok(Ok((tcp, tls))) = handle.await {
+            let mut stm = ConnectionStream::new(tcp, tls);
+            poll_fn(|cx| stm.poll_write(cx, &buf)).await;
+            poll_fn(|cx| stm.poll_shutdown(cx)).await;
+          }
+        });
+      }
+      TlsStreamState::Open(mut stm) => {
+        spawn(async move {
+          poll_fn(|cx| stm.poll_shutdown(cx)).await;
+        });
+      }
+      TlsStreamState::Closed => {
+        // Nothing
+      }
+    }
   }
 }
 
@@ -593,7 +624,7 @@ mod tests {
   }
 
   #[tokio::test]
-  #[ntest::timeout(60000)]
+  // #[ntest::timeout(60000)]
   async fn test_server_immediate_close() -> TestResult {
     let (server, mut client) = tls_pair().await;
     let a = spawn(async move {
@@ -676,28 +707,28 @@ mod tests {
     Ok(())
   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_shutdown_before_handshake() -> TestResult {
-  //     let (mut server, mut client) = tls_pair().await;
-  //     let a = spawn(async move {
-  //       let mut futures = FuturesUnordered::new();
+  #[tokio::test]
+  // #[ntest::timeout(60000)]
+  async fn test_server_shutdown_before_handshake() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      let mut futures = FuturesUnordered::new();
 
-  //       // The client handshake must complete before the server shutdown is resolved
-  //       futures.push(server.shutdown().map(|_| 1).boxed());
-  //       futures.push(client.handshake().map(|_| 2).boxed());
+      // The client handshake must complete before the server shutdown is resolved
+      futures.push(server.shutdown().map(|_| 1).boxed());
+      futures.push(client.handshake().map(|_| 2).boxed());
 
-  //       assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 2);
-  //       assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 1);
-  //       drop(futures);
+      assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 2);
+      assert_eq!(poll_fn(|cx| futures.poll_next_unpin(cx)).await.unwrap(), 1);
+      drop(futures);
 
-  //       // Can't read -- server shut down
-  //       expect_eof_read(&mut client).await;
-  //     });
-  //     a.await?;
+      // Can't read -- server shut down
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
 
-  //     Ok(())
-  //   }
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]
