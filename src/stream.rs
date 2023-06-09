@@ -163,7 +163,7 @@ impl TlsStream {
     let handshake = handshake.as_ref().expect("Should be Some");
     match handshake {
       Ok(h) => Ok(h.clone()),
-      Err(err) => Err(err.kind().into())
+      Err(err) => Err(err.kind().into()),
     }
   }
 
@@ -510,7 +510,8 @@ mod tests {
   #[tokio::test]
   #[ntest::timeout(60000)]
   async fn test_client_server_alpn() -> TestResult {
-    let (mut server, mut client) = tls_pair_alpn(&["a", "b", "c"], &["b"]).await;
+    let (mut server, mut client) =
+      tls_pair_alpn(&["a", "b", "c"], &["b"]).await;
     let a = spawn(async move {
       let handshake = server.handshake().await.unwrap();
       assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
