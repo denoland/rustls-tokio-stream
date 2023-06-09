@@ -1058,8 +1058,10 @@ mod tests {
 
     let expected = if cfg!(target_os = "windows") {
       ErrorKind::ConnectionAborted
-    } else {
+    } else if cfg!(target_os = "macos") {
       ErrorKind::ConnectionReset
+    } else {
+      ErrorKind::UnexpectedEof
     };
     expect_io_error(client.handshake().await, expected);
     // Can't read -- server shut down. Because this happened before the handshake, we get the underlying
