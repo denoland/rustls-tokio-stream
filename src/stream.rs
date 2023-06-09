@@ -1057,24 +1057,17 @@ mod tests {
     server.shutdown().await?;
     drop(server);
 
-    expect_io_error(client.handshake().await, ErrorKind::ConnectionReset);
+    let expected = if cfg!(target_os = "windows") {
+      ErrorKind::ConnectionAborted
+    } else {
+      ErrorKind::ConnectionReset
+    };
+    expect_io_error(client.handshake().await, expected);
     // Can't read -- server shut down. Because this happened before the handshake, we get the underlying
     // error here.
-    expect_io_error_read(&mut client, ErrorKind::ConnectionReset).await;
+    expect_io_error_read(&mut client, expected).await;
     Ok(())
   }
-
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_crash_no_handshake() -> TestResult {
-  //     let (server, mut client) = tls_pair().await;
-  //     let (mut tcp, _tls) = server.into_inner();
-  //     tcp.shutdown().await?;
-
-  //     // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
-  //     expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
-  //     Ok(())
-  //   }
 
   #[tokio::test]
   async fn test_server_crash_after_handshake() -> TestResult {
