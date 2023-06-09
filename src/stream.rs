@@ -4,6 +4,7 @@ use crate::connection_stream::ConnectionStream;
 use crate::handshake;
 use crate::handshake::handshake_task;
 use crate::handshake::handshake_task_internal;
+use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
 use futures::task::noop_waker;
@@ -352,6 +353,7 @@ impl TlsStream {
 
   pub async fn close(mut self) -> io::Result<()> {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
+    trace!("closing {self:?}");
     match state {
       TlsStreamState::Handshaking(handle, _, buf) => {
         match handle.await {
@@ -377,7 +379,6 @@ impl TlsStream {
         poll_fn(|cx| stm.poll_shutdown(cx)).await?;
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        println!("drop 3");
         // Nothing
       }
     }
@@ -468,38 +469,36 @@ impl AsyncWrite for TlsStream {
 
 impl Drop for TlsStream {
   fn drop(&mut self) {
+    trace!("dropping {self:?}");
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking(handle, _, buf) => {
-        println!("drop 1");
         spawn(async move {
-          // println!("drop 1*");
+          trace!("in task");
           match handle.await {
             Ok(Ok((tcp, tls))) => {
               let mut stm = ConnectionStream::new(tcp, tls);
-              let res = poll_fn(|cx| stm.poll_write(cx, &buf)).await;
-              println!("a {res:?}");
-              let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-              println!("a {res:?}");
+              trace!("{:?}", poll_fn(|cx| stm.poll_write(cx, &buf)).await);
+              trace!("{:?}", poll_fn(|cx| stm.poll_shutdown(cx)).await);
             }
             x @ Err(_) => {
-              println!("1 {x:?}");
+              trace!("{x:?}");
             }
             x @ Ok(Err(_)) => {
-              println!("2 {x:?}");
+              trace!("{x:?}");
             }
           }
+          trace!("done task");
         });
       }
       TlsStreamState::Open(mut stm) => {
-        println!("drop 2");
         spawn(async move {
-          println!("drop 2*");
-          poll_fn(|cx| stm.poll_shutdown(cx)).await;
+          trace!("in task");
+          trace!("{:?}", poll_fn(|cx| stm.poll_shutdown(cx)).await);
+          trace!("done task");
         });
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        println!("drop 3");
         // Nothing
       }
     }

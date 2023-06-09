@@ -126,7 +126,6 @@ pub(crate) async fn handshake_task_internal(
       try_read(&mut tcp, &mut tls).await?;
     }
   }
-  println!("loop exit");
   Ok((tcp, tls))
 }
 

@@ -7,6 +7,10 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/denoland/rustls-tokio-stream"
 
+[features]
+default = []
+trace = []
+
 [dependencies]
 tokio = { version = "1", features = [ "io-util", "net", "rt", "sync" ] }
 rustls = "0.21"

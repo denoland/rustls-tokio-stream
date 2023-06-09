@@ -16,6 +16,21 @@ struct TestOptions {
   slow_handshake_write: bool,
 }
 
+macro_rules! trace {
+    ($($args:expr),+) => {
+      #[cfg(feature="trace")]
+      {
+        println!($($args),+);
+      }
+      #[cfg(not(feature="trace"))]
+      {
+        format!($($args),+);
+      }
+    };
+}
+
+pub(crate) use trace;
+
 #[cfg(test)]
 mod tests {
   use rustls::client::ServerCertVerified;
