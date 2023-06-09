@@ -54,6 +54,10 @@ impl ConnectionStream {
     }
   }
 
+  pub fn into_inner(self) -> (TcpStream, Connection) {
+    return (self.tcp, self.tls);
+  }
+
   fn plaintext_bytes_to_read(&self) -> usize {
     self
       .last_iostate

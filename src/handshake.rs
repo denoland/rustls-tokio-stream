@@ -13,7 +13,11 @@ async fn try_read<'a, 'b>(
   tls: &'b mut Connection,
 ) -> io::Result<()> {
   match read_tls(tcp, tls) {
-    Ok(n) => {
+    Ok(n) if n == 0 => {
+      // EOF during handshake
+      return Err(ErrorKind::UnexpectedEof.into());
+    }
+    Ok(_) => {
       tls
         .process_new_packets()
         .map_err(|_| io::Error::from(ErrorKind::InvalidData))?;

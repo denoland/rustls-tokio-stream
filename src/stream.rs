@@ -23,6 +23,7 @@ use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
 use std::cell::Cell;
+use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -52,6 +53,8 @@ enum TlsStreamState {
   Open(ConnectionStream),
   /// The connection is closed.
   Closed,
+  /// The connection is closed because of an error.
+  ClosedError(ErrorKind),
 }
 
 pub struct TlsStream {
@@ -59,7 +62,25 @@ pub struct TlsStream {
   handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
 }
 
-#[derive(Clone)]
+impl Debug for TlsStream {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match &self.state {
+      TlsStreamState::Handshaking(..) => {
+        f.write_str("TlsStream { Handshaking }")
+      }
+      TlsStreamState::Open(..) => f.write_fmt(format_args!(
+        "TlsStream {{ Open, handshake: {:?} }}",
+        self.handshake.borrow()
+      )),
+      TlsStreamState::Closed => f.write_str("TlsStream { Closed }"),
+      TlsStreamState::ClosedError(err) => {
+        f.write_fmt(format_args!("TlsStream {{ Closed, error: {:?} }}", err))
+      }
+    }
+  }
+}
+
+#[derive(Clone, Debug)]
 pub struct TlsHandshake {
   alpn: Option<Vec<u8>>,
 }
@@ -153,10 +174,28 @@ impl TlsStream {
     Self::new(tcp, Connection::Server(connection), TestOptions::default())
   }
 
-  // pub fn into_inner(mut self) -> (TcpStream, Connection) {
-  //   let inner = self.0.take().unwrap();
-  //   (inner.tcp, inner.tls)
-  // }
+  /// Attempt to retrieve the inner stream and connection.
+  pub fn try_into_inner(mut self) -> Result<(TcpStream, Connection), Self> {
+    match self.state {
+      TlsStreamState::Open(_) => {
+        let TlsStreamState::Open(stm) = std::mem::replace(&mut self.state, TlsStreamState::Closed) else {
+          unreachable!()
+        };
+        Ok(stm.into_inner())
+      }
+      _ => Err(self),
+    }
+  }
+
+  pub async fn into_inner(mut self) -> io::Result<(TcpStream, Connection)> {
+    poll_fn(|cx| self.poll_pending_handshake(cx)).await?;
+    match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
+      TlsStreamState::Open(stm) => Ok(stm.into_inner()),
+      TlsStreamState::Closed => Err(ErrorKind::NotConnected.into()),
+      TlsStreamState::ClosedError(err) => Err(err.into()),
+      TlsStreamState::Handshaking(..) => unreachable!(),
+    }
+  }
 
   // pub fn into_split(self) -> (ReadHalf, WriteHalf) {
   //   let shared = Shared::new(self);
@@ -289,9 +328,8 @@ impl TlsStream {
       ready!(self.poll_pending_handshake(cx))
     };
 
-    if res.is_err() {
-      // ?
-      self.state = TlsStreamState::Closed
+    if let Err(err) = res {
+      self.state = TlsStreamState::ClosedError(err.kind());
     }
 
     match &mut self.state {
@@ -307,6 +345,8 @@ impl TlsStream {
       }
       // Closed: return ready.
       TlsStreamState::Closed => Poll::Ready(Ok(())),
+      // Closed: return error.
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
     }
   }
 
@@ -336,7 +376,7 @@ impl TlsStream {
       TlsStreamState::Open(mut stm) => {
         poll_fn(|cx| stm.poll_shutdown(cx)).await?;
       }
-      TlsStreamState::Closed => {
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         println!("drop 3");
         // Nothing
       }
@@ -355,9 +395,8 @@ impl AsyncRead for TlsStream {
     match ready!(self.poll_pending_handshake(cx)) {
       Ok(()) => {}
       Err(err) => {
-        self.state = TlsStreamState::Closed;
-        // TODO: error
-        return Poll::Ready(Ok(()));
+        self.state = TlsStreamState::ClosedError(err.kind());
+        return Poll::Ready(Err(err));
       }
     };
     match &mut self.state {
@@ -376,8 +415,10 @@ impl AsyncRead for TlsStream {
         }
       }
       TlsStreamState::Closed => {
-        // TODO(mmastrac): Should we differentiate between failed and non-failed close?
         return Poll::Ready(Ok(()));
+      }
+      TlsStreamState::ClosedError(err) => {
+        return Poll::Ready(Err((*err).into()));
       }
     }
   }
@@ -399,6 +440,7 @@ impl AsyncWrite for TlsStream {
       TlsStreamState::Closed => {
         Poll::Ready(Err(ErrorKind::NotConnected.into()))
       }
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
     }
   }
 
@@ -408,10 +450,11 @@ impl AsyncWrite for TlsStream {
   ) -> Poll<io::Result<()>> {
     match &mut self.state {
       TlsStreamState::Handshaking(..) => Poll::Ready(Ok(())),
+      TlsStreamState::Open(stm) => stm.poll_flush(cx),
       TlsStreamState::Closed => {
         Poll::Ready(Err(ErrorKind::NotConnected.into()))
       }
-      TlsStreamState::Open(stm) => stm.poll_flush(cx),
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
     }
   }
 
@@ -455,7 +498,7 @@ impl Drop for TlsStream {
           poll_fn(|cx| stm.poll_shutdown(cx)).await;
         });
       }
-      TlsStreamState::Closed => {
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         println!("drop 3");
         // Nothing
       }
@@ -586,6 +629,22 @@ mod tests {
     (server, client)
   }
 
+  async fn tls_with_tcp_client() -> (TlsStream, TcpStream) {
+    let (server, client) = tcp_pair().await;
+    let server = TlsStream::new_server_side(server, server_config(&[]).into());
+    (server, client)
+  }
+
+  async fn tls_with_tcp_server() -> (TcpStream, TlsStream) {
+    let (server, client) = tcp_pair().await;
+    let client = TlsStream::new_client_side(
+      client,
+      client_config(&[]).into(),
+      "example.com".try_into().unwrap(),
+    );
+    (server, client)
+  }
+
   async fn tls_pair_slow_handshake(
     delay_handshake: bool,
     slow_server: bool,
@@ -633,12 +692,8 @@ mod tests {
     (server, client)
   }
 
-  async fn tls_pair_handshake(
-    server_alpn: &[&str],
-    client_alpn: &[&str],
-  ) -> (TlsStream, TlsStream) {
-    let (mut server, mut client) =
-      tls_pair_alpn(server_alpn, client_alpn).await;
+  async fn tls_pair_handshake() -> (TlsStream, TlsStream) {
+    let (mut server, mut client) = tls_pair_alpn(&[], &[]).await;
     let a = spawn(async move {
       server.handshake().await.unwrap();
       server
@@ -946,7 +1001,7 @@ mod tests {
   #[tokio::test]
   #[ntest::timeout(60000)]
   async fn test_server_dropped_after_handshake() -> TestResult {
-    let (server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let (server, mut client) = tls_pair_handshake().await;
     drop(server);
     // Can't read -- server shut down (but it was graceful)
     expect_eof_read(&mut client).await;
@@ -956,7 +1011,7 @@ mod tests {
   #[tokio::test]
   #[ntest::timeout(60000)]
   async fn test_server_dropped_after_handshake_with_write() -> TestResult {
-    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let (mut server, mut client) = tls_pair_handshake().await;
     server.write_all(b"XYZ").await.unwrap();
     drop(server);
     // Can't read -- server shut down (but it was graceful)
@@ -985,18 +1040,29 @@ mod tests {
     Ok(())
   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_crash() -> TestResult {
-  //     let (server, mut client) = tls_pair().await;
-  //     let (mut tcp, _tls) = server.into_inner();
-  //     tcp.shutdown().await?;
+  #[tokio::test]
+  async fn test_server_half_crash_before_handshake() -> TestResult {
+    let (mut server, mut client) = tls_with_tcp_server().await;
+    server.shutdown().await?;
 
-  //     expect_io_error(client.handshake().await, ErrorKind::UnexpectedEof);
-  //     // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
-  //     expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
-  //     Ok(())
-  //   }
+    expect_io_error(client.handshake().await, ErrorKind::UnexpectedEof);
+    // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
+    expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_server_crash_before_handshake() -> TestResult {
+    let (mut server, mut client) = tls_with_tcp_server().await;
+    server.shutdown().await?;
+    drop(server);
+
+    expect_io_error(client.handshake().await, ErrorKind::ConnectionReset);
+    // Can't read -- server shut down. Because this happened before the handshake, we get the underlying
+    // error here.
+    expect_io_error_read(&mut client, ErrorKind::ConnectionReset).await;
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]
@@ -1010,26 +1076,25 @@ mod tests {
   //     Ok(())
   //   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_crash_after_handshake() -> TestResult {
-  //     let (server, mut client) = tls_pair_handshake().await;
+  #[tokio::test]
+  async fn test_server_crash_after_handshake() -> TestResult {
+    let (server, mut client) = tls_pair_handshake().await;
 
-  //     let (mut tcp, _tls) = server.into_inner();
-  //     tcp.shutdown().await?;
-  //     drop(tcp);
+    let (mut tcp, _tls) = server.into_inner().await.unwrap();
+    tcp.shutdown().await?;
+    drop(tcp);
 
-  //     // Can't read -- server shut down. While it wasn't graceful, we should not get an error here.
-  //     expect_eof_read(&mut client).await;
-  //     Ok(())
-  //   }
+    // Can't read -- server shut down. This is an unexpected EOF.
+    expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
+    Ok(())
+  }
 
   #[tokio::test(flavor = "current_thread")]
   async fn large_transfer_with_shutdown() -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let (mut server, mut client) = tls_pair_handshake().await;
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
@@ -1056,7 +1121,7 @@ mod tests {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let (mut server, mut client) = tls_pair_handshake().await;
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
