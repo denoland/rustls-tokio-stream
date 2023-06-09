@@ -1,7 +1,7 @@
 use rustls::Connection;
 use std::io;
 use std::io::ErrorKind;
-use std::time::Duration;
+
 use tokio::net::TcpStream;
 
 use crate::adapter::read_tls;
@@ -64,6 +64,11 @@ pub(crate) async fn handshake_task_internal(
   mut tls: Connection,
   test_options: TestOptions,
 ) -> io::Result<(TcpStream, Connection)> {
+  #[cfg(not(test))]
+  {
+    _ = test_options;
+  }
+
   assert!(tls.is_handshaking());
   // We want to exit this loop when we are no longer handshaking AND we no longer have
   // write interest.
@@ -75,7 +80,7 @@ pub(crate) async fn handshake_task_internal(
       tcp.writable().await?;
       #[cfg(test)]
       if test_options.slow_handshake_write {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
       match try_write(&mut tcp, &mut tls).await {
         Ok(()) => {}
@@ -121,7 +126,7 @@ pub(crate) async fn handshake_task_internal(
       tcp.readable().await?;
       #[cfg(test)]
       if test_options.slow_handshake_read {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
       try_read(&mut tcp, &mut tls).await?;
     }

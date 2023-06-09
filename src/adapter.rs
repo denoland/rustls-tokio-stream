@@ -4,7 +4,6 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
-use std::task::Poll;
 use tokio::net::TcpStream;
 
 #[inline(always)]
@@ -20,15 +19,6 @@ fn trace_error(error: io::Error) -> io::Error {
     }
   }
   error
-}
-
-#[inline(always)]
-fn trace_poll_error<T>(poll: Poll<io::Result<T>>) -> Poll<io::Result<T>> {
-  match poll {
-    Poll::Pending => Poll::Pending,
-    Poll::Ready(Ok(x)) => Poll::Ready(Ok(x)),
-    Poll::Ready(Err(err)) => Poll::Ready(Err(trace_error(err))),
-  }
 }
 
 pub struct ImplementReadTrait<'a, T>(pub &'a mut T);
@@ -63,17 +53,17 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   }
 }
 
-pub fn read_tls<'a, 'b>(
-  tcp: &'a mut TcpStream,
-  tls: &'b mut Connection,
+pub fn read_tls(
+  tcp: &mut TcpStream,
+  tls: &mut Connection,
 ) -> io::Result<usize> {
   let mut read = ImplementReadTrait(tcp);
   tls.read_tls(&mut read)
 }
 
-pub fn write_tls<'a, 'b>(
-  tcp: &'a mut TcpStream,
-  tls: &'b mut Connection,
+pub fn write_tls(
+  tcp: &mut TcpStream,
+  tls: &mut Connection,
 ) -> io::Result<usize> {
   let mut write = ImplementWriteTrait(tcp);
   tls.write_tls(&mut write)

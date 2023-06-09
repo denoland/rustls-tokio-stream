@@ -5,14 +5,18 @@ mod connection_stream;
 mod handshake;
 mod stream;
 
+pub use handshake::handshake_task;
 pub use stream::TlsHandshake;
 pub use stream::TlsStream;
 
 /// Used to modify test timing to expose problems.
 #[derive(Copy, Clone, Default)]
 struct TestOptions {
+  #[cfg(test)]
   delay_handshake: bool,
+  #[cfg(test)]
   slow_handshake_read: bool,
+  #[cfg(test)]
   slow_handshake_write: bool,
 }
 

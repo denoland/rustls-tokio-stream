@@ -1,22 +1,18 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
 use crate::connection_stream::ConnectionStream;
-use crate::handshake;
-use crate::handshake::handshake_task;
+
 use crate::handshake::handshake_task_internal;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
-use futures::task::noop_waker;
-use futures::task::noop_waker_ref;
-use futures::task::AtomicWaker;
+
 use futures::task::Context;
 use futures::task::Poll;
-use futures::task::RawWaker;
-use futures::task::RawWakerVTable;
+
 use futures::task::Waker;
 use futures::FutureExt;
-use parking_lot::Mutex;
+
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
@@ -27,18 +23,18 @@ use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Weak;
+
 use std::task::ready;
-use std::time::Duration;
+
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
-use tokio::sync::oneshot;
+
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -83,7 +79,7 @@ impl Debug for TlsStream {
 
 #[derive(Clone, Debug)]
 pub struct TlsHandshake {
-  alpn: Option<Vec<u8>>,
+  pub alpn: Option<Vec<u8>>,
 }
 
 impl TlsStream {
@@ -100,12 +96,12 @@ impl TlsStream {
     let handle = spawn(async move {
       #[cfg(test)]
       if test_options.delay_handshake {
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
       }
       let res = handshake_task_internal(tcp, tls, test_options).await;
       match &res {
         Ok(res) => {
-          let alpn = (*res).1.alpn_protocol().map(|v| v.to_owned());
+          let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
           _ = tx.send(Some(Ok(TlsHandshake { alpn })));
         }
         Err(err) => {
@@ -247,7 +243,7 @@ impl TlsStream {
   ) -> Poll<io::Result<()>> {
     loop {
       match &mut self.state {
-        TlsStreamState::Handshaking(ref mut handle, ref waker, buf) => {
+        TlsStreamState::Handshaking(ref mut handle, ref _waker, buf) => {
           let res = ready!(handle.poll_unpin(cx));
           match res {
             Err(err) => {
@@ -265,7 +261,7 @@ impl TlsStream {
               let mut stm = ConnectionStream::new(tcp, tls);
               // We need to save all the data we wrote before the connection. The stream has an internal buffer
               // that matches our buffer, so it can accept it all.
-              if let Poll::Ready(Ok(len)) = stm.poll_write(cx, &buf) {
+              if let Poll::Ready(Ok(len)) = stm.poll_write(cx, buf) {
                 assert_eq!(len, buf.len());
               } else {
                 unreachable!("TLS stream should have accepted entire buffer");
@@ -339,7 +335,7 @@ impl TlsStream {
         unreachable!()
       }
       TlsStreamState::Open(stm) => {
-        let res = ready!(stm.poll_shutdown(cx));
+        let _res = ready!(stm.poll_shutdown(cx));
         // Because we're in shutdown, we will eat errors
         // TODO: error
         Poll::Ready(Ok(()))
@@ -406,21 +402,15 @@ impl AsyncRead for TlsStream {
       }
       TlsStreamState::Open(ref mut stm) => {
         match std::task::ready!(stm.poll_read(cx, buf)) {
-          Ok(n) => {
+          Ok(_n) => {
             // TODO: n?
-            return Poll::Ready(Ok(()));
+            Poll::Ready(Ok(()))
           }
-          Err(err) => {
-            return Poll::Ready(Err(err));
-          }
+          Err(err) => Poll::Ready(Err(err)),
         }
       }
-      TlsStreamState::Closed => {
-        return Poll::Ready(Ok(()));
-      }
-      TlsStreamState::ClosedError(err) => {
-        return Poll::Ready(Err((*err).into()));
-      }
+      TlsStreamState::Closed => Poll::Ready(Ok(())),
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
     }
   }
 }
@@ -435,7 +425,7 @@ impl AsyncWrite for TlsStream {
     match &mut self.state {
       TlsStreamState::Handshaking(_, _, write_buf) => {
         write_buf.extend_from_slice(buf);
-        return Poll::Ready(Ok(buf.len()));
+        Poll::Ready(Ok(buf.len()))
       }
       TlsStreamState::Open(ref mut stm) => stm.poll_write(cx, buf),
       TlsStreamState::Closed => {
@@ -519,13 +509,14 @@ mod tests {
   use std::io::BufRead;
   use std::io::ErrorKind;
   use std::net::Ipv4Addr;
+  use std::net::SocketAddr;
   use std::net::SocketAddrV4;
   use std::time::Duration;
   use tokio::io::AsyncReadExt;
   use tokio::io::AsyncWriteExt;
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
-  use tokio::select;
+  
   use tokio::spawn;
 
   type TestResult = Result<(), std::io::Error>;
@@ -651,12 +642,12 @@ mod tests {
   ) -> (TlsStream, TlsStream) {
     let (server, client) = tcp_pair().await;
     let server_test_options = TestOptions {
-      delay_handshake: delay_handshake,
+      delay_handshake,
       slow_handshake_read: slow_server,
       slow_handshake_write: slow_server,
     };
     let client_test_options = TestOptions {
-      delay_handshake: delay_handshake,
+      delay_handshake,
       slow_handshake_read: slow_client,
       slow_handshake_write: slow_client,
     };

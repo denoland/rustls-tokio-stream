@@ -55,10 +55,11 @@ impl ConnectionStream {
   }
 
   pub fn into_inner(self) -> (TcpStream, Connection) {
-    return (self.tcp, self.tls);
+    (self.tcp, self.tls)
   }
 
-  fn plaintext_bytes_to_read(&self) -> usize {
+  #[cfg(test)]
+  pub fn plaintext_bytes_to_read(&self) -> usize {
     self
       .last_iostate
       .as_ref()
@@ -66,7 +67,8 @@ impl ConnectionStream {
       .unwrap_or_default()
   }
 
-  fn tls_bytes_to_write(&self) -> usize {
+  #[cfg(test)]
+  pub fn tls_bytes_to_write(&self) -> usize {
     self
       .last_iostate
       .as_ref()
@@ -261,7 +263,7 @@ impl ConnectionStream {
     buf: &[u8],
   ) -> Poll<io::Result<usize>> {
     // Zero-length writes always succeed
-    if buf.len() == 0 {
+    if buf.is_empty() {
       return Poll::Ready(Ok(0));
     }
 
@@ -353,15 +355,15 @@ mod tests {
   use rustls::ClientConnection;
   use rustls::ServerConnection;
   use std::time::Duration;
-  use tokio::io::AsyncReadExt;
+  
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
 
-  async fn expect_write_1(mut conn: &mut ConnectionStream) {
+  async fn expect_write_1(conn: &mut ConnectionStream) {
     assert_eq!(poll_fn(|cx| conn.poll_write(cx, b"x")).await.unwrap(), 1);
   }
 
-  async fn wait_for_peek(mut conn: &mut ConnectionStream) {
+  async fn wait_for_peek(conn: &mut ConnectionStream) {
     loop {
       let mut buf = [0; 1];
       if conn.tcp.peek(&mut buf).await.unwrap() == 1 {
@@ -370,7 +372,7 @@ mod tests {
     }
   }
 
-  async fn wait_for_peek_n<const N: usize>(mut conn: &mut ConnectionStream) {
+  async fn wait_for_peek_n<const N: usize>(conn: &mut ConnectionStream) {
     loop {
       let mut buf = [0; N];
       if conn.tcp.peek(&mut buf).await.unwrap() == N {
@@ -380,7 +382,7 @@ mod tests {
     }
   }
 
-  async fn expect_read_1(mut conn: &mut ConnectionStream) {
+  async fn expect_read_1(conn: &mut ConnectionStream) {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
     assert_eq!(
@@ -392,7 +394,7 @@ mod tests {
   }
 
   async fn expect_read_1_err(
-    mut conn: &mut ConnectionStream,
+    conn: &mut ConnectionStream,
     error: ErrorKind,
   ) {
     let mut buf = [0; 1];
@@ -504,7 +506,7 @@ mod tests {
   #[cfg(not(target_os = "windows"))]
   #[tokio::test]
   async fn test_tcp_abort() -> TestResult {
-    let (mut server, mut client) = tcp_pair().await;
+    let (server, mut client) = tcp_pair().await;
     client.set_nodelay(true).unwrap();
     client.set_linger(Some(Duration::default())).unwrap();
     client.write_u8(0).await;
