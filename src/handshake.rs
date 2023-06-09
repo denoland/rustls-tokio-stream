@@ -72,7 +72,6 @@ pub async fn handshake_task(
       try_read(&mut tcp, &mut tls).await?;
     }
   }
-  println!("loop broke");
   Ok((tcp, tls))
 }
 

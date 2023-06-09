@@ -150,10 +150,12 @@ impl ConnectionStream {
 
     match self.tls.reader().read(buf_slice) {
       Ok(n) if n == 0 => {
+        println!("r*={n}");
         // EOF
         Ok(0)
       }
       Ok(n) => {
+        println!("r*={n}");
         // SAFETY: We know we read this much into the buffer
         unsafe { buf.assume_init(n) };
         buf.advance(n);
@@ -162,6 +164,7 @@ impl ConnectionStream {
       // One of the two errors that reader().read can return: this is not associated with the non-blocking
       // errors on the underlying TCP stream, it just means we have no data available.
       Err(err) if err.kind() == ErrorKind::WouldBlock => {
+        println!("r*={err:?}");
         // No data to read, but we need to make sure we don't have an error state here.
         if self.rd_proto_error.is_some() {
           // TODO: Should we expose the underlying TLS error?
@@ -177,6 +180,7 @@ impl ConnectionStream {
       // This is the only other error that reader().read method can legitimately return, and it happens if the other
       // side fails to close the connection cleanly.
       Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+        println!("r*={err:?}");
         self.rd_error = Some(ErrorKind::UnexpectedEof);
         Err(err)
       }
@@ -245,6 +249,16 @@ impl ConnectionStream {
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<io::Result<usize>> {
+    // Zero-length writes always succeed
+    if buf.len() == 0 {
+      return Poll::Ready(Ok(0));
+    }
+
+    // Writes after shutdown return NotConnected
+    if self.close_sent {
+      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
+    }
+
     // First prepare to write
     let res = loop {
       let write = self.poll_write_only(cx);

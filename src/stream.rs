@@ -5,6 +5,7 @@ use crate::handshake;
 use crate::handshake::handshake_task;
 use futures::future::poll_fn;
 use futures::task::noop_waker;
+use futures::task::noop_waker_ref;
 use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
@@ -167,6 +168,48 @@ impl TlsStream {
     }
   }
 
+  /// If the handshake is complete, migrate from a pending handshake to the open state.
+  fn poll_pending_handshake(
+    &mut self,
+    cx: &mut Context<'_>,
+  ) -> Poll<io::Result<()>> {
+    loop {
+      match &mut self.state {
+        TlsStreamState::Handshaking(ref mut handle, ref waker, buf) => {
+          let res = ready!(handle.poll_unpin(cx));
+          match res {
+            Err(err) => {
+              if err.is_panic() {
+                // Resume the panic on the main task
+                std::panic::resume_unwind(err.into_panic());
+              } else {
+                unreachable!("Task should not have been cancelled");
+              }
+            }
+            Ok(Err(err)) => {
+              return Poll::Ready(Err(err));
+            }
+            Ok(Ok((tcp, tls))) => {
+              let mut stm = ConnectionStream::new(tcp, tls);
+              // We need to save all the data we wrote before the connection. The stream has an internal buffer
+              // that matches our buffer, so it can accept it all.
+              if let Poll::Ready(Ok(len)) = stm.poll_write(cx, &buf) {
+                assert_eq!(len, buf.len());
+              } else {
+                unreachable!("TLS stream should have accepted entire buffer");
+              }
+              self.state = TlsStreamState::Open(stm);
+              continue;
+            }
+          }
+        }
+        _ => {
+          return Poll::Ready(Ok(()));
+        }
+      }
+    }
+  }
+
   // fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
   //   match &mut self.0 {
   //     TlsStreamState::Handshaking(_, waker, _) => {
@@ -202,50 +245,25 @@ impl AsyncRead for TlsStream {
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
-    loop {
-      match &mut self.state {
-        TlsStreamState::Handshaking(ref mut handle, ref waker, buf) => {
-          let res = ready!(handle.poll_unpin(cx));
-          match res {
-            Err(err) => {
-              if err.is_panic() {
-                // Resume the panic on the main task
-                std::panic::resume_unwind(err.into_panic());
-              } else {
-                unreachable!("Task should not have been cancelled");
-              }
-            }
-            Ok(Err(err)) => {
-              return Poll::Ready(Err(err));
-            }
-            Ok(Ok((tcp, tls))) => {
-              let mut stm = ConnectionStream::new(tcp, tls);
-              // The stream has an internal buffer that matches our buffer, so it can accept it all
-              if let Poll::Ready(Ok(len)) = stm.poll_write(cx, &buf) {
-                assert_eq!(len, buf.len());
-              } else {
-                unreachable!("TLS stream should have accepted entire buffer");
-              }
-              self.state = TlsStreamState::Open(stm);
-              continue;
-            }
+    ready!(self.poll_pending_handshake(cx))?;
+    match &mut self.state {
+      TlsStreamState::Handshaking(..) => {
+        unreachable!()
+      }
+      TlsStreamState::Open(ref mut stm) => {
+        match std::task::ready!(stm.poll_read(cx, buf)) {
+          Ok(n) => {
+            // TODO: n?
+            return Poll::Ready(Ok(()));
+          }
+          Err(err) => {
+            return Poll::Ready(Err(err));
           }
         }
-        TlsStreamState::Open(ref mut stm) => {
-          match std::task::ready!(stm.poll_read(cx, buf)) {
-            Ok(n) => {
-              // TODO: n?
-              return Poll::Ready(Ok(()));
-            }
-            Err(err) => {
-              return Poll::Ready(Err(err));
-            }
-          }
-        }
-        TlsStreamState::Closed => {
-          // TODO(mmastrac): Should we differentiate between failed and non-failed close?
-          return Poll::Ready(Ok(()));
-        }
+      }
+      TlsStreamState::Closed => {
+        // TODO(mmastrac): Should we differentiate between failed and non-failed close?
+        return Poll::Ready(Ok(()));
       }
     }
   }
@@ -287,15 +305,19 @@ impl AsyncWrite for TlsStream {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
+    // If we're still handshaking, abort
+    if self.poll_pending_handshake(cx)?.is_pending() {
+      self.state = TlsStreamState::Closed;
+      return Poll::Ready(Ok(()));
+    }
+
     match &mut self.state {
       // Handshaking: drop the handshake and return ready.
       TlsStreamState::Handshaking(..) => {
-        self.state = TlsStreamState::Closed;
-        Poll::Ready(Ok(()))
+        unreachable!()
       }
       TlsStreamState::Open(stm) => {
         let res = ready!(stm.poll_shutdown(cx));
-        self.state = TlsStreamState::Closed;
         Poll::Ready(res)
       }
       // Closed: return ready.
@@ -590,66 +612,69 @@ mod tests {
     Ok(())
   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_orderly_shutdown() -> TestResult {
-  //     let (mut server, mut client) = tls_pair().await;
-  //     let (tx, rx) = tokio::sync::oneshot::channel();
-  //     let a = spawn(async move {
-  //       server.write_all(b"hello?").await.unwrap();
-  //       let mut buf = [0; 6];
-  //       server.read_exact(&mut buf).await.unwrap();
-  //       assert_eq!(buf.as_slice(), b"hello!");
-  //       // Shut down write, but reads are still open
-  //       server.shutdown().await.unwrap();
-  //       server.read_exact(&mut buf).await.unwrap();
-  //       assert_eq!(buf.as_slice(), b"hello*");
-  //       // Tell the client to shut down at some point after we've closed the server TCP socket.
-  //       drop(server);
-  //       tokio::time::sleep(Duration::from_millis(10)).await;
-  //       tx.send(()).unwrap();
-  //     });
-  //     let b = spawn(async move {
-  //       client.write_all(b"hello!").await.unwrap();
-  //       let mut buf = [0; 6];
-  //       client.read_exact(&mut buf).await.unwrap();
-  //       assert_eq!(client.read(&mut buf).await.unwrap(), 0);
-  //       client.write_all(b"hello*").await.unwrap();
-  //       // The server is long gone by the point we get the message, but it's a clean shutdown
-  //       rx.await.unwrap();
-  //       client.shutdown().await.unwrap();
-  //       drop(client);
-  //     });
-  //     a.await?;
-  //     b.await?;
+  #[tokio::test]
+  // #[ntest::timeout(60000)]
+  async fn test_orderly_shutdown() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let a = spawn(async move {
+      server.write_all(b"hello?").await.unwrap();
+      let mut buf = [0; 6];
+      server.read_exact(&mut buf).await.unwrap();
+      assert_eq!(buf.as_slice(), b"hello!");
+      // Shut down write, but reads are still open
+      server.shutdown().await.unwrap();
+      server.read_exact(&mut buf).await.unwrap();
+      assert_eq!(buf.as_slice(), b"hello*");
+      // Tell the client to shut down at some point after we've closed the server TCP socket.
+      drop(server);
+      tokio::time::sleep(Duration::from_millis(10)).await;
+      tx.send(()).unwrap();
+    });
+    let b = spawn(async move {
+      client.write_all(b"hello!").await.unwrap();
+      let mut buf = [0; 6];
+      client.read_exact(&mut buf).await.unwrap();
+      assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+      client.write_all(b"hello*").await.unwrap();
+      // The server is long gone by the point we get the message, but it's a clean shutdown
+      rx.await.unwrap();
+      client.shutdown().await.unwrap();
+      drop(client);
+    });
+    a.await?;
+    b.await?;
 
-  //     Ok(())
-  //   }
+    Ok(())
+  }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_shutdown_after_handshake() -> TestResult {
-  //     let (mut server, mut client) = tls_pair().await;
-  //     let (tx, rx) = tokio::sync::oneshot::channel();
-  //     let a = spawn(async move {
-  //       // Shut down after the handshake
-  //       server.handshake().await.unwrap();
-  //       server.shutdown().await.unwrap();
-  //       tx.send(()).unwrap();
-  //       expect_io_error(server.write_all(b"hello?").await, io::ErrorKind::BrokenPipe);
-  //     });
-  //     let b = spawn(async move {
-  //       assert!(client.get_ref().1.is_handshaking());
-  //       client.handshake().await.unwrap();
-  //       rx.await.unwrap();
-  //       // Can't read -- server shut down
-  //       expect_eof_read(&mut client).await;
-  //     });
-  //     a.await?;
-  //     b.await?;
+  #[tokio::test]
+  // #[ntest::timeout(60000)]
+  async fn test_server_shutdown_after_handshake() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let a = spawn(async move {
+      // Shut down after the handshake
+      server.handshake().await.unwrap();
+      server.shutdown().await.unwrap();
+      tx.send(()).unwrap();
+      expect_io_error(
+        server.write_all(b"hello?").await,
+        io::ErrorKind::NotConnected,
+      );
+    });
+    let b = spawn(async move {
+      // assert!(client.get_ref().1.is_handshaking());
+      client.handshake().await.unwrap();
+      rx.await.unwrap();
+      // Can't read -- server shut down
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
 
-  //     Ok(())
-  //   }
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]
