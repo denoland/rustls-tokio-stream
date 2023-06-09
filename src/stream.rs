@@ -278,34 +278,6 @@ impl TlsStream {
     }
   }
 
-  // fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-  //   match &mut self.0 {
-  //     TlsStreamState::Handshaking(_, waker, _) => {
-  //       waker.register(cx.waker());
-  //       Poll::Pending
-  //     },
-  //     _ => Poll::Ready(Ok(()))
-  //   }
-  // }
-
-  // pub fn get_alpn_protocol(&mut self) -> Option<&[u8]> {
-  //   self.inner_mut().tls.alpn_protocol()
-  // }
-
-  // pub async fn shutdown(&mut self) -> io::Result<()> {
-  //   poll_fn(|cx| self.inner_mut().poll_shutdown(cx)).await
-  // }
-
-  // pub async fn flush(&mut self) -> io::Result<()> {
-  //   poll_fn(|cx| self.inner_mut().poll_flush(cx)).await
-  // }
-
-  // pub async fn close(mut self) -> io::Result<()> {
-  //   let mut inner = self.0.take().unwrap();
-  //   while !poll_fn(|cx| inner.poll_close(cx)).await? {}
-  //   Ok(())
-  // }
-
   /// Shuts the connection down, optionally waiting for the handshake to complete.
   fn poll_shutdown_or_abort(
     mut self: Pin<&mut Self>,
