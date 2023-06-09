@@ -3,6 +3,8 @@
 use crate::connection_stream::ConnectionStream;
 use crate::handshake;
 use crate::handshake::handshake_task;
+use crate::handshake::handshake_task_internal;
+use crate::TestOptions;
 use futures::future::poll_fn;
 use futures::task::noop_waker;
 use futures::task::noop_waker_ref;
@@ -28,6 +30,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::task::ready;
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
@@ -62,17 +65,24 @@ pub struct TlsHandshake {
 }
 
 impl TlsStream {
-  fn new(tcp: TcpStream, mut tls: Connection) -> Self {
+  fn new(
+    tcp: TcpStream,
+    mut tls: Connection,
+    test_options: TestOptions,
+  ) -> Self {
     tls.set_buffer_limit(None);
 
     let (tx, handshake) = watch::channel(None);
 
     // TODO(mmastrac): We're using a oneshot to notify the reader, but this could be more efficient
     let handle = spawn(async move {
-      let res = handshake_task(tcp, tls).await;
+      if test_options.delay_handshake {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+      }
+      let res = handshake_task_internal(tcp, tls, test_options).await;
       match &res {
         Ok(res) => {
-          let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
+          let alpn = (*res).1.alpn_protocol().map(|v| v.to_owned());
           _ = tx.send(Some(Ok(TlsHandshake { alpn })));
         }
         Err(err) => {
@@ -96,14 +106,35 @@ impl TlsStream {
     server_name: ServerName,
   ) -> Self {
     let tls = ClientConnection::new(tls_config, server_name).unwrap();
-    Self::new(tcp, Connection::Client(tls))
+    Self::new(tcp, Connection::Client(tls), TestOptions::default())
+  }
+
+  #[cfg(test)]
+  pub(crate) fn new_client_side_test_options(
+    tcp: TcpStream,
+    tls_config: Arc<ClientConfig>,
+    server_name: ServerName,
+    test_options: TestOptions,
+  ) -> Self {
+    let tls = ClientConnection::new(tls_config, server_name).unwrap();
+    Self::new(tcp, Connection::Client(tls), test_options)
   }
 
   pub fn new_client_side_from(
     tcp: TcpStream,
     connection: ClientConnection,
   ) -> Self {
-    Self::new(tcp, Connection::Client(connection))
+    Self::new(tcp, Connection::Client(connection), TestOptions::default())
+  }
+
+  #[cfg(test)]
+  pub(crate) fn new_server_side_test_options(
+    tcp: TcpStream,
+    tls_config: Arc<ServerConfig>,
+    test_options: TestOptions,
+  ) -> Self {
+    let tls = ServerConnection::new(tls_config).unwrap();
+    Self::new(tcp, Connection::Server(tls), test_options)
   }
 
   pub fn new_server_side(
@@ -111,14 +142,14 @@ impl TlsStream {
     tls_config: Arc<ServerConfig>,
   ) -> Self {
     let tls = ServerConnection::new(tls_config).unwrap();
-    Self::new(tcp, Connection::Server(tls))
+    Self::new(tcp, Connection::Server(tls), TestOptions::default())
   }
 
   pub fn new_server_side_from(
     tcp: TcpStream,
     connection: ServerConnection,
   ) -> Self {
-    Self::new(tcp, Connection::Server(connection))
+    Self::new(tcp, Connection::Server(connection), TestOptions::default())
   }
 
   // pub fn into_inner(mut self) -> (TcpStream, Connection) {
@@ -361,20 +392,35 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking(handle, _, buf) => {
+        println!("drop 1");
         spawn(async move {
-          if let Ok(Ok((tcp, tls))) = handle.await {
-            let mut stm = ConnectionStream::new(tcp, tls);
-            poll_fn(|cx| stm.poll_write(cx, &buf)).await;
-            poll_fn(|cx| stm.poll_shutdown(cx)).await;
+          // println!("drop 1*");
+          match handle.await {
+            Ok(Ok((tcp, tls))) => {
+              let mut stm = ConnectionStream::new(tcp, tls);
+              let res = poll_fn(|cx| stm.poll_write(cx, &buf)).await;
+              println!("a {res:?}");
+              let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
+              println!("a {res:?}");
+            }
+            x @ Err(_) => {
+              println!("1 {x:?}");
+            }
+            x @ Ok(Err(_)) => {
+              println!("2 {x:?}");
+            }
           }
         });
       }
       TlsStreamState::Open(mut stm) => {
+        println!("drop 2");
         spawn(async move {
+          println!("drop 2*");
           poll_fn(|cx| stm.poll_shutdown(cx)).await;
         });
       }
       TlsStreamState::Closed => {
+        println!("drop 3");
         // Nothing
       }
     }
@@ -387,6 +433,7 @@ mod tests {
   use futures::stream::FuturesUnordered;
   use futures::FutureExt;
   use futures::StreamExt;
+  use rstest::rstest;
   use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
   use rustls::Certificate;
@@ -503,6 +550,36 @@ mod tests {
     (server, client)
   }
 
+  async fn tls_pair_slow_handshake(
+    slow_server: bool,
+    slow_client: bool,
+  ) -> (TlsStream, TlsStream) {
+    let (server, client) = tcp_pair().await;
+    let server_test_options = TestOptions {
+      delay_handshake: slow_server,
+      slow_handshake_read: slow_server,
+      slow_handshake_write: slow_server,
+    };
+    let client_test_options = TestOptions {
+      delay_handshake: slow_client,
+      slow_handshake_read: slow_client,
+      slow_handshake_write: slow_client,
+    };
+    let server = TlsStream::new_server_side_test_options(
+      server,
+      server_config(&[]).into(),
+      server_test_options,
+    );
+    let client = TlsStream::new_client_side_test_options(
+      client,
+      client_config(&[]).into(),
+      "example.com".try_into().unwrap(),
+      client_test_options,
+    );
+
+    (server, client)
+  }
+
   async fn tls_pair_alpn(
     server_alpn: &[&str],
     client_alpn: &[&str],
@@ -557,10 +634,18 @@ mod tests {
 
   /// Test that automatic state transition works: send and receive work as expected without waiting
   /// for the handshake
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  #[ntest::timeout(60000)]
-  async fn test_client_server() -> TestResult {
-    let (mut server, mut client) = tls_pair().await;
+  async fn test_client_server(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
       let mut buf = [0; 6];
@@ -605,10 +690,18 @@ mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  #[ntest::timeout(60000)]
-  async fn test_client_immediate_close() -> TestResult {
-    let (mut server, client) = tls_pair().await;
+  async fn test_client_immediate_close(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let a = spawn(async move {
       server.shutdown().await.unwrap();
       // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
@@ -625,10 +718,47 @@ mod tests {
     Ok(())
   }
 
+  // ---- stream::tests::test_server_immediate_close stdout ----
+  // w=Ok(242)
+  // r(4096)=Ok(242)
+  // w=Ok(127)
+  // w=Ok(6)
+  // w=Ok(32)
+  // w=Ok(913)
+  // w=Ok(286)
+  // w=Ok(74)
+  // r(4096)=Err(Kind(WouldBlock))
+  // r(4096)=Ok(1438)
+  // w=Ok(6)
+  // w=Ok(74)
+  // w=Ok(24)
+  // r(4096)=Err(Kind(WouldBlock))
+  // r(4096)=Ok(80)
+  // w=Ok(103)
+  // w=Ok(103)
+  // w=Ok(103)
+  // w=Ok(103)
+  // w=Ok(24)
+  // r(4096)=Ok(103)
+  // r*=Kind(WouldBlock)
+  // r(4096)=Err(Os { code: 54, kind: ConnectionReset, message: "Connection reset by peer" })
+  // r*=Kind(WouldBlock)
+  // thread 'stream::tests::test_server_immediate_close' panicked at 'Expected no error: Kind(ConnectionReset)', src/stream.rs:548:38
+  // note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  // Error: Custom { kind: Other, error: "task panicked" }
+
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  // #[ntest::timeout(60000)]
-  async fn test_server_immediate_close() -> TestResult {
-    let (server, mut client) = tls_pair().await;
+  async fn test_server_immediate_close(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let a = spawn(async move {
       drop(server);
     });
@@ -645,10 +775,18 @@ mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  // #[ntest::timeout(60000)]
-  async fn test_orderly_shutdown() -> TestResult {
-    let (mut server, mut client) = tls_pair().await;
+  async fn test_orderly_shutdown(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
@@ -681,10 +819,18 @@ mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  // #[ntest::timeout(60000)]
-  async fn test_server_shutdown_after_handshake() -> TestResult {
-    let (mut server, mut client) = tls_pair().await;
+  async fn test_server_shutdown_after_handshake(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
       // Shut down after the handshake
@@ -709,10 +855,18 @@ mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  // #[ntest::timeout(60000)]
-  async fn test_server_shutdown_before_handshake() -> TestResult {
-    let (mut server, mut client) = tls_pair().await;
+  async fn test_server_shutdown_before_handshake(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     let a = spawn(async move {
       let mut futures = FuturesUnordered::new();
 
@@ -732,10 +886,18 @@ mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
   #[tokio::test]
-  #[ntest::timeout(60000)]
-  async fn test_server_dropped() -> TestResult {
-    let (server, mut client) = tls_pair().await;
+  async fn test_server_dropped(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (server, mut client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
     // The server will spawn a task to complete the handshake and then go away
     drop(server);
     client.handshake().await?;
@@ -744,39 +906,47 @@ mod tests {
     Ok(())
   }
 
-    #[tokio::test]
-    #[ntest::timeout(60000)]
-    async fn test_server_dropped_after_handshake() -> TestResult {
-      let (server, mut client) = tls_pair_handshake(&[], &[]).await;
-      drop(server);
-      // Can't read -- server shut down (but it was graceful)
-      expect_eof_read(&mut client).await;
-      Ok(())
-    }
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped_after_handshake() -> TestResult {
+    let (server, mut client) = tls_pair_handshake(&[], &[]).await;
+    drop(server);
+    // Can't read -- server shut down (but it was graceful)
+    expect_eof_read(&mut client).await;
+    Ok(())
+  }
 
-    #[tokio::test]
-    #[ntest::timeout(60000)]
-    async fn test_server_dropped_after_handshake_with_write() -> TestResult {
-      let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
-      server.write_all(b"XYZ").await.unwrap();
-      drop(server);
-      // Can't read -- server shut down (but it was graceful)
-      let mut buf: [u8; 10] = [0; 10];
-      assert_eq!(client.read(&mut buf).await.unwrap(), 3);
-      Ok(())
-    }
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped_after_handshake_with_write() -> TestResult {
+    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    server.write_all(b"XYZ").await.unwrap();
+    drop(server);
+    // Can't read -- server shut down (but it was graceful)
+    let mut buf: [u8; 10] = [0; 10];
+    assert_eq!(client.read(&mut buf).await.unwrap(), 3);
+    Ok(())
+  }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_client_dropped() -> TestResult {
-  //     let (mut server, client) = tls_pair().await;
-  //     drop(client);
-  //     // The client will spawn a task to complete the handshake and then go away
-  //     server.handshake().await?;
-  //     // Can't read -- server shut down (but it was graceful)
-  //     expect_eof_read(&mut server).await;
-  //     Ok(())
-  //   }
+  #[rstest]
+  #[case(false, false)]
+  #[case(false, true)]
+  #[case(true, false)]
+  #[case(true, true)]
+  #[tokio::test]
+  async fn test_client_dropped(
+    #[case] server_slow: bool,
+    #[case] client_slow: bool,
+  ) -> TestResult {
+    let (mut server, client) =
+      tls_pair_slow_handshake(server_slow, client_slow).await;
+    drop(client);
+    // The client will spawn a task to complete the handshake and then go away
+    server.handshake().await?;
+    // Can't read -- server shut down (but it was graceful)
+    expect_eof_read(&mut server).await;
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]

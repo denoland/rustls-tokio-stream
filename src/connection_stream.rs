@@ -4,9 +4,12 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
+use std::pin::Pin;
 use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
+use tokio::io::AsyncWrite;
+use tokio::io::AsyncWriteExt;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
@@ -324,6 +327,8 @@ impl ConnectionStream {
       self.close_sent = true;
     }
     ready!(self.poll_flush(cx))?;
+    // Note that this is not technically an async call
+    _ = Pin::new(&mut self.tcp).poll_shutdown(cx);
     Poll::Ready(Ok(()))
   }
 }

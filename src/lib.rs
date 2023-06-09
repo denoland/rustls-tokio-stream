@@ -8,6 +8,14 @@ mod stream;
 pub use stream::TlsHandshake;
 pub use stream::TlsStream;
 
+/// Used to modify test timing to expose problems.
+#[derive(Copy, Clone, Default)]
+struct TestOptions {
+  delay_handshake: bool,
+  slow_handshake_read: bool,
+  slow_handshake_write: bool,
+}
+
 #[cfg(test)]
 mod tests {
   use rustls::client::ServerCertVerified;

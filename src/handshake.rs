@@ -1,10 +1,12 @@
 use rustls::Connection;
 use std::io;
 use std::io::ErrorKind;
+use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::adapter::read_tls;
 use crate::adapter::write_tls;
+use crate::TestOptions;
 
 async fn try_read<'a, 'b>(
   tcp: &'a mut TcpStream,
@@ -47,8 +49,16 @@ async fn try_write<'a, 'b>(
 
 /// Performs a handshake and returns the [`TcpStream`]/[`Connection`] pair if successful.
 pub async fn handshake_task(
+  tcp: TcpStream,
+  tls: Connection,
+) -> io::Result<(TcpStream, Connection)> {
+  handshake_task_internal(tcp, tls, TestOptions::default()).await
+}
+
+pub(crate) async fn handshake_task_internal(
   mut tcp: TcpStream,
   mut tls: Connection,
+  test_options: TestOptions,
 ) -> io::Result<(TcpStream, Connection)> {
   assert!(tls.is_handshaking());
   // We want to exit this loop when we are no longer handshaking AND we no longer have
@@ -59,7 +69,42 @@ pub async fn handshake_task(
     }
     if tls.wants_write() {
       tcp.writable().await?;
-      try_write(&mut tcp, &mut tls).await?;
+      if test_options.slow_handshake_write {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+      }
+      match try_write(&mut tcp, &mut tls).await {
+        Ok(()) => {}
+        Err(err) => {
+          struct WriteSink();
+
+          impl std::io::Write for WriteSink {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+              Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+              Ok(())
+            }
+          }
+
+          // return Err(err);
+
+          // This is a bit of sleight-of-hand: if the handshake fails to write because the other side is gone
+          // or otherwise errors, _BUT_ writing takes us out of handshaking mode, we treat this as a successful
+          // handshake and defer the error to later on when someone wants to write data.
+          while tls.is_handshaking() && tls.wants_write() {
+            _ = tls.write_tls(&mut WriteSink());
+          }
+
+          if tls.is_handshaking() {
+            // Still handshaking but ran out of write interest, so return the error.
+            return Err(err);
+          } else {
+            // Not handshaking, no write interest, pretend we succeeded and pick up the error later.
+            return Ok((tcp, tls));
+          }
+        }
+      }
     }
     if !tls.is_handshaking() && !tls.wants_write() {
       break;
@@ -69,9 +114,13 @@ pub async fn handshake_task(
     // rustls 0.21 (in the former we didn't need the `tls.wants_read()` test).
     if tls.is_handshaking() && tls.wants_read() {
       tcp.readable().await?;
+      if test_options.slow_handshake_read {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+      }
       try_read(&mut tcp, &mut tls).await?;
     }
   }
+  println!("loop exit");
   Ok((tcp, tls))
 }
 
