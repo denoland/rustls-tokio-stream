@@ -303,7 +303,8 @@ impl ConnectionStream {
         StreamProgress::MadeProgress => continue,
         StreamProgress::NoInterest => break Poll::Ready(Ok(())),
         StreamProgress::Error => {
-          break Poll::Ready(Err(self.wr_error.unwrap().into()))
+          println!("flush={}", self.wr_error.unwrap());
+          break Poll::Ready(Err(self.wr_error.unwrap().into()));
         }
       }
     }

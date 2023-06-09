@@ -269,7 +269,9 @@ impl TlsStream {
       }
       TlsStreamState::Open(stm) => {
         let res = ready!(stm.poll_shutdown(cx));
-        Poll::Ready(res)
+        // Because we're in shutdown, we will eat errors
+        // TODO: error
+        Poll::Ready(Ok(()))
       }
       // Closed: return ready.
       TlsStreamState::Closed => Poll::Ready(Ok(())),
@@ -730,17 +732,17 @@ mod tests {
     Ok(())
   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_dropped() -> TestResult {
-  //     let (server, mut client) = tls_pair().await;
-  //     // The server will spawn a task to complete the handshake and then go away
-  //     drop(server);
-  //     client.handshake().await?;
-  //     // Can't read -- server shut down (but it was graceful)
-  //     expect_eof_read(&mut client).await;
-  //     Ok(())
-  //   }
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_server_dropped() -> TestResult {
+    let (server, mut client) = tls_pair().await;
+    // The server will spawn a task to complete the handshake and then go away
+    drop(server);
+    client.handshake().await?;
+    // Can't read -- server shut down (but it was graceful)
+    expect_eof_read(&mut client).await;
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]
