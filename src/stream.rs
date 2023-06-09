@@ -309,6 +309,41 @@ impl TlsStream {
       TlsStreamState::Closed => Poll::Ready(Ok(())),
     }
   }
+
+  pub async fn close(mut self) -> io::Result<()> {
+    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
+    match state {
+      TlsStreamState::Handshaking(handle, _, buf) => {
+        match handle.await {
+          Ok(Ok((tcp, tls))) => {
+            let mut stm = ConnectionStream::new(tcp, tls);
+            poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
+            poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+          }
+          Err(err) => {
+            if err.is_panic() {
+              // Resume the panic on the main task
+              std::panic::resume_unwind(err.into_panic());
+            } else {
+              unreachable!("Task should not have been cancelled");
+            }
+          }
+          Ok(Err(err)) => {
+            return Err(err);
+          }
+        }
+      }
+      TlsStreamState::Open(mut stm) => {
+        poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+      }
+      TlsStreamState::Closed => {
+        println!("drop 3");
+        // Nothing
+      }
+    }
+
+    Ok(())
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -552,17 +587,18 @@ mod tests {
   }
 
   async fn tls_pair_slow_handshake(
+    delay_handshake: bool,
     slow_server: bool,
     slow_client: bool,
   ) -> (TlsStream, TlsStream) {
     let (server, client) = tcp_pair().await;
     let server_test_options = TestOptions {
-      delay_handshake: slow_server,
+      delay_handshake: delay_handshake,
       slow_handshake_read: slow_server,
       slow_handshake_write: slow_server,
     };
     let client_test_options = TestOptions {
-      delay_handshake: slow_client,
+      delay_handshake: delay_handshake,
       slow_handshake_read: slow_client,
       slow_handshake_write: slow_client,
     };
@@ -646,7 +682,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
       let mut buf = [0; 6];
@@ -702,7 +738,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let a = spawn(async move {
       server.shutdown().await.unwrap();
       // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
@@ -759,7 +795,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let a = spawn(async move {
       drop(server);
     });
@@ -787,7 +823,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
       server.write_all(b"hello?").await.unwrap();
@@ -831,7 +867,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let a = spawn(async move {
       // Shut down after the handshake
@@ -867,7 +903,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     let a = spawn(async move {
       let mut futures = FuturesUnordered::new();
 
@@ -898,7 +934,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (server, mut client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     // The server will spawn a task to complete the handshake and then go away
     drop(server);
     client.handshake().await?;
@@ -940,7 +976,7 @@ mod tests {
     #[case] client_slow: bool,
   ) -> TestResult {
     let (mut server, client) =
-      tls_pair_slow_handshake(server_slow, client_slow).await;
+      tls_pair_slow_handshake(false, server_slow, client_slow).await;
     drop(client);
     // The client will spawn a task to complete the handshake and then go away
     server.handshake().await?;
@@ -988,58 +1024,57 @@ mod tests {
   //     Ok(())
   //   }
 
-  //   #[tokio::test(flavor = "current_thread")]
-  //   #[ntest::timeout(60000)]
-  //   async fn large_transfer_with_shutdown() -> TestResult {
-  //     const BUF_SIZE: usize = 10 * 1024;
-  //     const BUF_COUNT: usize = 1024;
+  #[tokio::test(flavor = "current_thread")]
+  async fn large_transfer_with_shutdown() -> TestResult {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
 
-  //     let (mut server, mut client) = tls_pair_handshake().await;
-  //     let a = spawn(async move {
-  //       // Heap allocate a large buffer and send it
-  //       let buf = vec![42; BUF_COUNT * BUF_SIZE];
-  //       server.write_all(&buf).await.unwrap();
-  //       server.shutdown().await.unwrap();
-  //       server.close().await.unwrap();
-  //     });
-  //     let b = spawn(async move {
-  //       for _ in 0..BUF_COUNT {
-  //         tokio::time::sleep(Duration::from_millis(1)).await;
-  //         let mut buf = [0; BUF_SIZE];
-  //         assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
-  //       }
-  //       expect_eof_read(&mut client).await;
-  //     });
-  //     a.await?;
-  //     b.await?;
-  //     Ok(())
-  //   }
+    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      server.shutdown().await.unwrap();
+      server.close().await.unwrap();
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
+    Ok(())
+  }
 
-  //   #[tokio::test(flavor = "current_thread")]
-  //   #[ntest::timeout(60000)]
-  //   async fn large_transfer_no_shutdown() -> TestResult {
-  //     const BUF_SIZE: usize = 10 * 1024;
-  //     const BUF_COUNT: usize = 1024;
+  #[tokio::test(flavor = "current_thread")]
+  #[ntest::timeout(60000)]
+  async fn large_transfer_no_shutdown() -> TestResult {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
 
-  //     let (mut server, mut client) = tls_pair_handshake().await;
-  //     let a = spawn(async move {
-  //       // Heap allocate a large buffer and send it
-  //       let buf = vec![42; BUF_COUNT * BUF_SIZE];
-  //       server.write_all(&buf).await.unwrap();
-  //       server.close().await.unwrap();
-  //     });
-  //     let b = spawn(async move {
-  //       for _ in 0..BUF_COUNT {
-  //         tokio::time::sleep(Duration::from_millis(1)).await;
-  //         let mut buf = [0; BUF_SIZE];
-  //         assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
-  //       }
-  //       expect_eof_read(&mut client).await;
-  //     });
-  //     a.await?;
-  //     b.await?;
-  //     Ok(())
-  //   }
+    let (mut server, mut client) = tls_pair_handshake(&[], &[]).await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      server.close().await.unwrap();
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
+    Ok(())
+  }
 
   //   #[tokio::test(flavor = "current_thread")]
   //   async fn large_transfer_drop_socket_after_flush() -> TestResult {
