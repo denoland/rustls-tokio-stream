@@ -17,6 +17,9 @@ pub struct ConnectionStream {
   tls: Connection,
   tcp: TcpStream,
   last_iostate: Option<IoState>,
+  /// If poll_shutdown has been called at least once
+  wants_close_sent: bool,
+  /// If we're successfully sent CLOSE_NOTIFY
   close_sent: bool,
   /// An error on the TLS read protocol stream.
   rd_proto_error: Option<rustls::Error>,
@@ -39,6 +42,7 @@ impl ConnectionStream {
     Self {
       tls,
       tcp,
+      wants_close_sent: false,
       close_sent: false,
       last_iostate: None,
       rd_proto_error: None,
@@ -255,7 +259,7 @@ impl ConnectionStream {
     }
 
     // Writes after shutdown return NotConnected
-    if self.close_sent {
+    if self.wants_close_sent {
       return Poll::Ready(Err(ErrorKind::NotConnected.into()));
     }
 
@@ -311,6 +315,8 @@ impl ConnectionStream {
     &mut self,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
+    // Immediate state change so we can error writes
+    self.wants_close_sent = true;
     if !self.close_sent {
       ready!(self.poll_flush(cx))?;
       self.tls.send_close_notify();
@@ -413,6 +419,28 @@ mod tests {
     let (mut server, mut client) = tls_pair().await;
     expect_write_1(&mut client).await;
     expect_read_1(&mut server).await;
+    Ok(())
+  }
+
+  /// One byte read/write, don't check close.
+  #[tokio::test]
+  async fn test_connection_stream_shutdown() -> TestResult {
+    let (mut server, mut client) = tls_pair().await;
+    expect_write_1(&mut client).await;
+    expect_read_1(&mut server).await;
+
+    let cx = &mut Context::from_waker(noop_waker_ref());
+    // Start the shutdown process
+    _ = server.poll_shutdown(cx);
+    // Writes immediately fail
+    match server.poll_write(cx, &[0]) {
+      Poll::Ready(Err(err)) => {
+        assert_eq!(err.kind(), ErrorKind::NotConnected);
+      }
+      _ => {
+        panic!("Should have failed");
+      }
+    };
     Ok(())
   }
 
