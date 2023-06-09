@@ -64,11 +64,15 @@ pub async fn handshake_task(
     if !tls.is_handshaking() && !tls.wants_write() {
       break;
     }
-    if tls.wants_read() {
+    // TLS may want a read, but if we're not handshaking it doesn't help us make progress -- we'll stay in
+    // this loop while we flush writes. Note that these signals changed subtly between rustls 0.20 and
+    // rustls 0.21 (in the former we didn't need the `tls.wants_read()` test).
+    if tls.is_handshaking() && tls.wants_read() {
       tcp.readable().await?;
       try_read(&mut tcp, &mut tls).await?;
     }
   }
+  println!("loop broke");
   Ok((tcp, tls))
 }
 

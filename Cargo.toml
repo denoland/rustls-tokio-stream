@@ -9,12 +9,12 @@ repository = "https://github.com/denoland/rustls-tokio-stream"
 
 [dependencies]
 tokio = { version = "1", features = [ "io-util", "net", "rt", "sync" ] }
-rustls = "0.20"
+rustls = "0.21"
 futures = "0.3"
 parking_lot = "0.12"
 
 [dev_dependencies]
 tokio = { version = "1", features = [ "full" ] }
 rustls-pemfile = "1.0"
-rustls = { version = "0.20", features = [ "dangerous_configuration" ] }
+rustls = { version = "0.21", features = [ "dangerous_configuration" ] }
 ntest = "0.9"
