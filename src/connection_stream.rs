@@ -328,6 +328,7 @@ impl ConnectionStream {
     }
     ready!(self.poll_flush(cx))?;
     // Note that this is not technically an async call
+    // TODO(mmastrac): This is currently untested
     _ = Pin::new(&mut self.tcp).poll_shutdown(cx);
     Poll::Ready(Ok(()))
   }

@@ -76,6 +76,7 @@ impl TlsStream {
 
     // TODO(mmastrac): We're using a oneshot to notify the reader, but this could be more efficient
     let handle = spawn(async move {
+      #[cfg(test)]
       if test_options.delay_handshake {
         tokio::time::sleep(Duration::from_millis(1000)).await;
       }

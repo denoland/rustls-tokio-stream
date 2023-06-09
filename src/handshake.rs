@@ -69,6 +69,7 @@ pub(crate) async fn handshake_task_internal(
     }
     if tls.wants_write() {
       tcp.writable().await?;
+      #[cfg(test)]
       if test_options.slow_handshake_write {
         tokio::time::sleep(Duration::from_millis(100)).await;
       }
@@ -114,6 +115,7 @@ pub(crate) async fn handshake_task_internal(
     // rustls 0.21 (in the former we didn't need the `tls.wants_read()` test).
     if tls.is_handshaking() && tls.wants_read() {
       tcp.readable().await?;
+      #[cfg(test)]
       if test_options.slow_handshake_read {
         tokio::time::sleep(Duration::from_millis(100)).await;
       }
