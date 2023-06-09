@@ -570,25 +570,25 @@ mod tests {
     Ok(())
   }
 
-  //   #[tokio::test]
-  //   #[ntest::timeout(60000)]
-  //   async fn test_server_immediate_close() -> TestResult {
-  //     let (server, mut client) = tls_pair().await;
-  //     let a = spawn(async move {
-  //       drop(server);
-  //     });
-  //     let b = spawn(async move {
-  //       client.shutdown().await.unwrap();
-  //       // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
-  //       // regular read.
-  //       expect_eof_read(&mut client).await;
-  //       drop(client);
-  //     });
-  //     a.await?;
-  //     b.await?;
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_server_immediate_close() -> TestResult {
+    let (server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      drop(server);
+    });
+    let b = spawn(async move {
+      client.shutdown().await.unwrap();
+      // While this races the handshake, we are not going to expose a handshake EOF to the stream in a
+      // regular read.
+      expect_eof_read(&mut client).await;
+      drop(client);
+    });
+    a.await?;
+    b.await?;
 
-  //     Ok(())
-  //   }
+    Ok(())
+  }
 
   //   #[tokio::test]
   //   #[ntest::timeout(60000)]

@@ -5,6 +5,9 @@ mod connection_stream;
 mod handshake;
 mod stream;
 
+pub use stream::TlsHandshake;
+pub use stream::TlsStream;
+
 #[cfg(test)]
 mod tests {
   use rustls::client::ServerCertVerified;
