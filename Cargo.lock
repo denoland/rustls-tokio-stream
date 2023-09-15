@@ -525,11 +525,10 @@ dependencies = [
 
 [[package]]
 name = "rustls-tokio-stream"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "ntest",
- "parking_lot",
  "rstest",
  "rustls",
  "rustls-pemfile",
