@@ -288,6 +288,7 @@ impl ConnectionStream {
         StreamProgress::NoInterest => {
           // Write it
           let n = self.tls.writer().write(buf).expect("Write will never fail");
+          trace!("w={n}");
           assert!(n > 0);
           // Drain what we can
           while self.poll_write_only(cx) == StreamProgress::MadeProgress {}
@@ -301,6 +302,12 @@ impl ConnectionStream {
     while self.poll_read_only(cx) == StreamProgress::MadeProgress {}
 
     res
+  }
+
+  /// Fully write a buffer to the TLS stream, expecting it to write fully and not fail.
+  pub(crate) fn write_buf_fully(&mut self, buf: &[u8]) {
+    let n = self.tls.writer().write(buf).expect("Write will never fail");
+    assert_eq!(n, buf.len())
   }
 
   /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
