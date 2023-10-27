@@ -5,6 +5,9 @@ mod connection_stream;
 mod handshake;
 mod stream;
 
+#[cfg(test)]
+mod system_test;
+
 pub use handshake::handshake_task;
 pub use stream::TlsHandshake;
 pub use stream::TlsStream;
@@ -21,22 +24,24 @@ struct TestOptions {
 }
 
 macro_rules! trace {
-    ($($args:expr),+) => {
-      #[cfg(feature="trace")]
-      {
-        println!($($args),+);
-      }
-      #[cfg(not(feature="trace"))]
-      {
-        format!($($args),+);
-      }
-    };
+  ($($args:expr),+) => {
+    #[cfg(feature="trace")]
+    {
+      println!($($args),+);
+    }
+    #[cfg(not(feature="trace"))]
+    {
+      format!($($args),+);
+    }
+  };
 }
 
 pub(crate) use trace;
 
 #[cfg(test)]
 mod tests {
+  pub use super::stream::tests::tls_pair;
+  pub use super::stream::tests::tls_pair_buffer_size;
   use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
   use rustls::Certificate;

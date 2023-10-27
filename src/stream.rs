@@ -512,9 +512,13 @@ impl AsyncWrite for TlsStream {
               Poll::Pending
             } else {
               trace!("write buf");
-              let buf = &buf[0..remaining];
-              write_buf.extend_from_slice(buf);
-              Poll::Ready(Ok(buf.len()))
+              if buf.len() <= remaining {
+                write_buf.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+              } else {
+                write_buf.extend_from_slice(&buf[0..remaining]);
+                Poll::Ready(Ok(remaining))
+              }
             }
           } else {
             trace!("write buf");
@@ -594,7 +598,7 @@ impl Drop for TlsStream {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
   use super::*;
   use futures::stream::FuturesUnordered;
   use futures::FutureExt;
@@ -705,7 +709,13 @@ mod tests {
     (server, client)
   }
 
-  async fn tls_pair() -> (TlsStream, TlsStream) {
+  pub async fn tls_pair() -> (TlsStream, TlsStream) {
+    tls_pair_buffer_size(None).await
+  }
+
+  pub async fn tls_pair_buffer_size(
+    buffer_size: Option<NonZeroUsize>,
+  ) -> (TlsStream, TlsStream) {
     let (server, client) = tcp_pair().await;
     let server =
       TlsStream::new_server_side(server, server_config(&[]).into(), None);
@@ -713,7 +723,7 @@ mod tests {
       client,
       client_config(&[]).into(),
       "example.com".try_into().unwrap(),
-      None,
+      buffer_size,
     );
 
     (server, client)
