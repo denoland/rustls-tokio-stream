@@ -382,6 +382,77 @@ impl ConnectionStream {
     res
   }
 
+  pub fn poll_write_vectored(
+    &mut self,
+    cx: &mut Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> Poll<io::Result<usize>> {
+    // Zero-length writes always succeed
+    if bufs.is_empty() {
+      self.wr_waker.take();
+      return Poll::Ready(Ok(0));
+    }
+
+    // Writes after shutdown return NotConnected
+    if self.wants_close_sent {
+      self.wr_waker.take();
+      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
+    }
+
+    // First prepare to write
+    let res = loop {
+      let write = self.poll_write_only(PollContext::Explicit(cx));
+      match write {
+        // No room to write
+        StreamProgress::RegisteredWaker => break Poll::Pending,
+        // We wrote something, so let's loop again
+        StreamProgress::MadeProgress => continue,
+        // Wedged on an error
+        StreamProgress::Error => {
+          break Poll::Ready(Err(self.wr_error.unwrap().into()))
+        }
+        // No current write interest, so let's generate some
+        StreamProgress::NoInterest => {
+          // Write it
+          let n = self
+            .tls
+            .writer()
+            .write_vectored(bufs)
+            .expect("Write will never fail");
+          trace!("w={n}");
+          assert!(n > 0);
+          // Drain what we can
+          while self.poll_write_only(PollContext::Explicit(cx))
+            == StreamProgress::MadeProgress
+          {}
+          // And then return what we wrote
+          break Poll::Ready(Ok(n));
+        }
+      };
+    };
+
+    // Then read until we lose interest
+    while self.poll_read_only(PollContext::Implicit(cx))
+      == StreamProgress::MadeProgress
+    {}
+
+    if res.is_ready() {
+      self.wr_waker.take();
+    } else {
+      // Replace the waker unless we already have it
+      if !self
+        .wr_waker
+        .as_ref()
+        .map(|w| cx.waker().will_wake(w))
+        .unwrap_or_default()
+      {
+        self.wr_waker = Some(cx.waker().clone());
+      }
+    }
+
+    res
+  }
+
   /// Fully write a buffer to the TLS stream, expecting it to write fully and not fail.
   pub(crate) fn write_buf_fully(&mut self, buf: &[u8]) {
     let n = self.tls.writer().write(buf).expect("Write will never fail");

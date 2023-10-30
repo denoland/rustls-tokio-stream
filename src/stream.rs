@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
+use std::io::Write;
 use tokio::task::JoinError;
 
 use std::num::NonZeroUsize;
@@ -549,6 +550,73 @@ impl AsyncWrite for TlsStream {
         Poll::Ready(Err(ErrorKind::NotConnected.into()))
       }
       TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+    }
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    true
+  }
+
+  fn poll_write_vectored(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> Poll<Result<usize, io::Error>> {
+    let buffer_size = self.buffer_size;
+    loop {
+      break match &mut self.state {
+        TlsStreamState::Handshaking {
+          handle,
+          write_waker,
+          write_buf,
+          ..
+        } => {
+          // If the handshake completed, we want to finalize it and then continue
+          if handle.is_finished() {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
+              unreachable!()
+            };
+            self.finalize_handshake(res)?;
+            continue;
+          }
+          if let Some(buffer_size) = buffer_size {
+            let mut remaining = buffer_size.get() - write_buf.len();
+            if remaining == 0 {
+              // No room to write, so store the waker for whenever the handshake is done
+              write_waker.set_waker(cx.waker());
+              trace!("write limit");
+              Poll::Pending
+            } else {
+              trace!("write buf");
+              let mut wrote = 0;
+              for buf in bufs {
+                if buf.len() <= remaining {
+                  write_buf.extend_from_slice(buf);
+                  wrote += buf.len();
+                  remaining -= buf.len();
+                } else {
+                  write_buf.extend_from_slice(&buf[0..remaining]);
+                  wrote += remaining;
+                  break;
+                }
+              }
+
+              // TODO(mmastrac): this currently ignores remaining size
+              Poll::Ready(Ok(wrote))
+            }
+          } else {
+            trace!("write buf");
+            Poll::Ready(Ok(write_buf.write_vectored(bufs).unwrap()))
+          }
+        }
+        TlsStreamState::Open(ref mut stm) => stm.poll_write_vectored(cx, bufs),
+        TlsStreamState::Closed => {
+          Poll::Ready(Err(ErrorKind::NotConnected.into()))
+        }
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+      };
     }
   }
 
