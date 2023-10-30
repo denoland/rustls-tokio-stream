@@ -147,7 +147,7 @@ impl TlsStream {
 
     Self {
       state: TlsStreamState::Handshaking {
-        handle: handle,
+        handle,
         read_waker,
         write_waker,
         write_buf: vec![],
@@ -239,7 +239,9 @@ impl TlsStream {
   pub fn try_into_inner(mut self) -> Result<(TcpStream, Connection), Self> {
     match self.state {
       TlsStreamState::Open(_) => {
-        let TlsStreamState::Open(stm) = std::mem::replace(&mut self.state, TlsStreamState::Closed) else {
+        let TlsStreamState::Open(stm) =
+          std::mem::replace(&mut self.state, TlsStreamState::Closed)
+        else {
           unreachable!()
         };
         Ok(stm.into_inner())
@@ -321,18 +323,17 @@ impl TlsStream {
               unreachable!("Task should not have been cancelled");
             }
           }
-          Ok(Err(err)) => {
-            return Err(err);
-          }
+          Ok(Err(err)) => Err(err),
           Ok(Ok((tcp, tls))) => {
             let mut stm = ConnectionStream::new(tcp, tls);
+            trace!("hs buf={}", buf.len());
             // We need to save all the data we wrote before the connection. The stream has an internal buffer
             // that matches our buffer, so it can accept it all.
             stm.write_buf_fully(buf);
             read_waker.wake();
             write_waker.wake();
             self.state = TlsStreamState::Open(stm);
-            return Ok(());
+            Ok(())
           }
         }
       }
@@ -350,9 +351,7 @@ impl TlsStream {
         let res = ready!(handle.poll_unpin(cx));
         Poll::Ready(self.finalize_handshake(res))
       }
-      _ => {
-        return Poll::Ready(Ok(()));
-      }
+      _ => Poll::Ready(Ok(())),
     }
   }
 
@@ -453,7 +452,9 @@ impl AsyncRead for TlsStream {
         } => {
           // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) = handle.poll_unpin(&mut Context::from_waker(noop_waker_ref())) else {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
               unreachable!()
             };
             self.finalize_handshake(res)?;
@@ -497,7 +498,9 @@ impl AsyncWrite for TlsStream {
         } => {
           // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) = handle.poll_unpin(&mut Context::from_waker(noop_waker_ref())) else {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
               unreachable!()
             };
             self.finalize_handshake(res)?;
@@ -1204,6 +1207,34 @@ pub(super) mod tests {
 
     // Can't read -- server shut down. This is an unexpected EOF.
     expect_io_error_read(&mut client, ErrorKind::UnexpectedEof).await;
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn large_transfer_no_buffer_limit_or_handshake() -> TestResult {
+    const BUF_SIZE: usize = 64 * 1024;
+    const BUF_COUNT: usize = 1024;
+
+    let (mut server, mut client) = tls_pair().await;
+    let a = spawn(async move {
+      // Heap allocate a large buffer and send it
+      let buf = vec![42; BUF_COUNT * BUF_SIZE];
+      server.write_all(&buf).await.unwrap();
+      assert_eq!(server.read_u8().await.unwrap(), 0xff);
+      server.shutdown().await.unwrap();
+      server.close().await.unwrap();
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      client.write_u8(0xff).await.unwrap();
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
     Ok(())
   }
 
