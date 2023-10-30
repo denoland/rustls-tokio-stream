@@ -1,4 +1,3 @@
-use futures::task::noop_waker_ref;
 use rustls::Connection;
 use rustls::IoState;
 use std::io;
