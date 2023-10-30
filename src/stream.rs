@@ -1186,6 +1186,7 @@ pub(super) mod tests {
     let expected = if cfg!(target_os = "windows") {
       ErrorKind::ConnectionAborted
     } else if cfg!(target_os = "macos") {
+      // TODO(mmastrac): this is occasionally `UnexpectedEof` on mac
       ErrorKind::ConnectionReset
     } else {
       ErrorKind::UnexpectedEof
