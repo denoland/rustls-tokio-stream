@@ -12,6 +12,9 @@ pub use handshake::handshake_task;
 pub use stream::TlsHandshake;
 pub use stream::TlsStream;
 
+/// Re-export the version of rustls we are built on
+pub use rustls;
+
 /// Used to modify test timing to expose problems.
 #[derive(Copy, Clone, Default)]
 struct TestOptions {
