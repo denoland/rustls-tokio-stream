@@ -950,6 +950,19 @@ pub(super) mod tests {
     Ok(())
   }
 
+  /// Test that a flush before a handshake completes works.
+  #[tokio::test]
+  // #[ntest::timeout(60000)]
+  async fn test_flush_before_handshake() -> TestResult {
+    let (mut server, mut client) =
+      tls_pair().await;
+    server.write_all(b"hello?").await.unwrap();
+    server.flush().await.unwrap();
+    let mut buf = [0; 6];
+    assert_eq!(6, client.read_exact(&mut buf).await.unwrap());
+    Ok(())
+  }
+
   /// Test that the handshake works, and we get the correct ALPN negotiated values.
   #[tokio::test]
   #[ntest::timeout(60000)]
