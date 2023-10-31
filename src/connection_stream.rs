@@ -327,60 +327,12 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
-    // Writes after shutdown return NotConnected
-    if self.wants_close_sent {
-      self.wr_waker.take();
-      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
-    }
-
-    // First prepare to write
-    let res = loop {
-      let write = self.poll_write_only(PollContext::Explicit(cx));
-      match write {
-        // No room to write
-        StreamProgress::RegisteredWaker => break Poll::Pending,
-        // We wrote something, so let's loop again
-        StreamProgress::MadeProgress => continue,
-        // Wedged on an error
-        StreamProgress::Error => {
-          break Poll::Ready(Err(self.wr_error.unwrap().into()))
-        }
-        // No current write interest, so let's generate some
-        StreamProgress::NoInterest => {
-          // Write it
-          let n = self.tls.writer().write(buf).expect("Write will never fail");
-          trace!("w={n}");
-          assert!(n > 0);
-          // Drain what we can
-          while self.poll_write_only(PollContext::Explicit(cx))
-            == StreamProgress::MadeProgress
-          {}
-          // And then return what we wrote
-          break Poll::Ready(Ok(n));
-        }
-      };
-    };
-
-    // Then read until we lose interest
-    while self.poll_read_only(PollContext::Implicit(cx))
-      == StreamProgress::MadeProgress
-    {}
-
-    if res.is_ready() {
-      self.wr_waker.take();
-    } else {
-      // Replace the waker unless we already have it
-      if !self
-        .wr_waker
-        .as_ref()
-        .map(|w| cx.waker().will_wake(w))
-        .unwrap_or_default()
-      {
-        self.wr_waker = Some(cx.waker().clone());
-      }
-    }
-
-    res
+    self.poll_perform_write(cx, |tls| {
+      let n = tls.writer().write(buf).expect("Write will never fail");
+      trace!("w={n}");
+      assert!(n > 0);
+      n
+    })
   }
 
   pub fn poll_write_vectored(
@@ -394,6 +346,25 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
+    self.poll_perform_write(cx, |tls| {
+      // TODO(mmastrac): we should manually write individual bufs here as rustls is not optimal if internal buffers are full
+      let n = tls
+        .writer()
+        .write_vectored(bufs)
+        .expect("Write will never fail");
+      trace!("w={n}");
+      assert!(n > 0);
+      n
+    })
+  }
+
+  /// Perform the common write steps required to prepare the connection and TLS state for a write (vectored or not) to happen.
+  #[inline(always)]
+  fn poll_perform_write(
+    &mut self,
+    cx: &mut Context<'_>,
+    f: impl Fn(&mut Connection) -> usize,
+  ) -> Poll<io::Result<usize>> {
     // Writes after shutdown return NotConnected
     if self.wants_close_sent {
       self.wr_waker.take();
@@ -415,13 +386,7 @@ impl ConnectionStream {
         // No current write interest, so let's generate some
         StreamProgress::NoInterest => {
           // Write it
-          let n = self
-            .tls
-            .writer()
-            .write_vectored(bufs)
-            .expect("Write will never fail");
-          trace!("w={n}");
-          assert!(n > 0);
+          let n = f(&mut self.tls);
           // Drain what we can
           while self.poll_write_only(PollContext::Explicit(cx))
             == StreamProgress::MadeProgress

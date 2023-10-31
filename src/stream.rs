@@ -480,6 +480,7 @@ impl AsyncWrite for TlsStream {
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<io::Result<usize>> {
+    // NOTE: Changes to this method may need to be reflected in `poll_write_vectored`
     let buffer_size = self.buffer_size;
     loop {
       break match &mut self.state {
@@ -531,29 +532,12 @@ impl AsyncWrite for TlsStream {
     }
   }
 
-  fn poll_flush(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<io::Result<()>> {
-    match &mut self.state {
-      TlsStreamState::Handshaking { .. } => Poll::Ready(Ok(())),
-      TlsStreamState::Open(stm) => stm.poll_flush(cx),
-      TlsStreamState::Closed => {
-        Poll::Ready(Err(ErrorKind::NotConnected.into()))
-      }
-      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
-    }
-  }
-
-  fn is_write_vectored(&self) -> bool {
-    true
-  }
-
   fn poll_write_vectored(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
     bufs: &[std::io::IoSlice<'_>],
   ) -> Poll<Result<usize, io::Error>> {
+    // NOTE: Changes to this method may need to be reflected in `poll_write`
     let buffer_size = self.buffer_size;
     loop {
       break match &mut self.state {
@@ -595,7 +579,6 @@ impl AsyncWrite for TlsStream {
                 }
               }
 
-              // TODO(mmastrac): this currently ignores remaining size
               Poll::Ready(Ok(wrote))
             }
           } else {
@@ -610,6 +593,24 @@ impl AsyncWrite for TlsStream {
         TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
       };
     }
+  }
+
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<io::Result<()>> {
+    match &mut self.state {
+      TlsStreamState::Handshaking { .. } => Poll::Ready(Ok(())),
+      TlsStreamState::Open(stm) => stm.poll_flush(cx),
+      TlsStreamState::Closed => {
+        Poll::Ready(Err(ErrorKind::NotConnected.into()))
+      }
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+    }
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    true
   }
 
   fn poll_shutdown(
