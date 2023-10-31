@@ -309,6 +309,8 @@ impl TlsStream {
       } => {
         match join_result {
           Err(err) => {
+            // We polled the handle, so we need to update the state to something
+            self.state = TlsStreamState::ClosedError(ErrorKind::Other);
             if err.is_panic() {
               // Resume the panic on the main task
               std::panic::resume_unwind(err.into_panic());
@@ -316,7 +318,10 @@ impl TlsStream {
               unreachable!("Task should not have been cancelled");
             }
           }
-          Ok(Err(err)) => Err(err),
+          Ok(Err(err)) => {
+            self.state = TlsStreamState::ClosedError(err.kind());
+            Err(err)
+          }
           Ok(Ok((tcp, tls))) => {
             let mut stm = ConnectionStream::new(tcp, tls);
             trace!("hs buf={}", buf.len());
@@ -984,6 +989,26 @@ pub(super) mod tests {
       client.write_all(b"hello!").await.unwrap();
       let mut buf = [0; 6];
       client.read_exact(&mut buf).await.unwrap();
+    });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  /// Test that the handshake works, and we get the correct ALPN negotiated values.
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_client_server_alpn_mismatch() -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_alpn(&["a"], None, &["b"], None).await;
+    let a = spawn(async move {
+      server.handshake().await.expect_err("Expected a failure");
+      server.flush().await.expect_err("Expected a failure");
+    });
+    let b = spawn(async move {
+      client.handshake().await.expect_err("Expected a failure");
+      client.flush().await.expect_err("Expected a failure");
     });
     a.await?;
     b.await?;
