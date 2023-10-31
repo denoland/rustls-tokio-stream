@@ -28,13 +28,9 @@ struct TestOptions {
 
 macro_rules! trace {
   ($($args:expr),+) => {
-    #[cfg(feature="trace")]
+    if false && cfg!(feature="trace")
     {
       println!($($args),+);
-    }
-    #[cfg(not(feature="trace"))]
-    {
-      format!($($args),+);
     }
   };
 }
