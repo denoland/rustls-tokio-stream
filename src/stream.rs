@@ -654,7 +654,8 @@ impl Drop for TlsStream {
             Ok(Ok((tcp, tls))) => {
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
-              trace!("{:?}", poll_fn(|cx| stm.poll_shutdown(cx)).await);
+              let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
+              trace!("{:?}", res);
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -669,7 +670,8 @@ impl Drop for TlsStream {
       TlsStreamState::Open(mut stm) => {
         spawn(async move {
           trace!("in task");
-          trace!("{:?}", poll_fn(|cx| stm.poll_shutdown(cx)).await);
+          let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
+          trace!("{:?}", res);
           trace!("done task");
         });
       }
@@ -954,8 +956,7 @@ pub(super) mod tests {
   #[tokio::test]
   // #[ntest::timeout(60000)]
   async fn test_flush_before_handshake() -> TestResult {
-    let (mut server, mut client) =
-      tls_pair().await;
+    let (mut server, mut client) = tls_pair().await;
     server.write_all(b"hello?").await.unwrap();
     server.flush().await.unwrap();
     let mut buf = [0; 6];
