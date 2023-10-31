@@ -65,7 +65,7 @@ mod tests {
 
   pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-  struct UnsafeVerifier {}
+  pub struct UnsafeVerifier {}
 
   impl ServerCertVerifier for UnsafeVerifier {
     fn verify_server_cert(
@@ -81,7 +81,7 @@ mod tests {
     }
   }
 
-  fn certificate() -> Certificate {
+  pub fn certificate() -> Certificate {
     let buf_read: &mut dyn BufRead =
       &mut &include_bytes!("testdata/localhost.crt")[..];
     let cert = rustls_pemfile::read_one(buf_read)
@@ -95,7 +95,7 @@ mod tests {
     }
   }
 
-  fn private_key() -> PrivateKey {
+  pub fn private_key() -> PrivateKey {
     let buf_read: &mut dyn BufRead =
       &mut &include_bytes!("testdata/localhost.key")[..];
     let cert = rustls_pemfile::read_one(buf_read)

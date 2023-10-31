@@ -1,3 +1,4 @@
+// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use rustls::Connection;
 use rustls::IoState;
 use std::io;
@@ -520,10 +521,14 @@ impl tokio::io::AsyncWrite for ConnectionStream {
 
   fn poll_write_vectored(
     self: Pin<&mut Self>,
-    _cx: &mut Context<'_>,
-    _bufs: &[futures::io::IoSlice<'_>],
+    cx: &mut Context<'_>,
+    bufs: &[futures::io::IoSlice<'_>],
   ) -> Poll<Result<usize, io::Error>> {
-    unimplemented!()
+    ConnectionStream::poll_write_vectored(self.get_mut(), cx, bufs)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    true
   }
 
   fn poll_flush(
@@ -555,7 +560,6 @@ mod tests {
   use rustls::ClientConnection;
   use rustls::ServerConnection;
   use std::time::Duration;
-
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
 

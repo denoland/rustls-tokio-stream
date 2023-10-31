@@ -1,19 +1,15 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
 use crate::connection_stream::ConnectionStream;
-
 use crate::handshake::handshake_task_internal;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
-
+use futures::task::noop_waker_ref;
 use futures::task::Context;
 use futures::task::Poll;
-
 use futures::task::Waker;
 use futures::FutureExt;
-
-use futures::task::noop_waker_ref;
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
@@ -25,22 +21,18 @@ use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
-use tokio::task::JoinError;
-
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-
 use std::task::ready;
-
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
-
 use tokio::sync::watch;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Default)]
@@ -671,6 +663,7 @@ impl Drop for TlsStream {
 #[cfg(test)]
 pub(super) mod tests {
   use super::*;
+  use crate::tests::expect_io_error;
   use futures::stream::FuturesUnordered;
   use futures::FutureExt;
   use futures::StreamExt;
@@ -689,7 +682,6 @@ pub(super) mod tests {
   use tokio::io::AsyncWriteExt;
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
-
   use tokio::spawn;
 
   type TestResult = Result<(), std::io::Error>;
@@ -892,13 +884,6 @@ pub(super) mod tests {
 
   async fn tls_pair_handshake() -> (TlsStream, TlsStream) {
     tls_pair_handshake_buffer_size(None, None).await
-  }
-
-  fn expect_io_error<T: std::fmt::Debug>(
-    e: Result<T, io::Error>,
-    kind: io::ErrorKind,
-  ) {
-    assert_eq!(e.expect_err("Expected error").kind(), kind);
   }
 
   async fn expect_eof_read(stm: &mut TlsStream) {
