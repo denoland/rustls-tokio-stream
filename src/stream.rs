@@ -599,13 +599,32 @@ impl AsyncWrite for TlsStream {
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
-    match &mut self.state {
-      TlsStreamState::Handshaking { .. } => Poll::Ready(Ok(())),
-      TlsStreamState::Open(stm) => stm.poll_flush(cx),
-      TlsStreamState::Closed => {
-        Poll::Ready(Err(ErrorKind::NotConnected.into()))
-      }
-      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+    loop {
+      break match &mut self.state {
+        TlsStreamState::Handshaking {
+          write_waker,
+          handle,
+          ..
+        } => {
+          if handle.is_finished() {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
+              unreachable!()
+            };
+            self.finalize_handshake(res)?;
+            continue;
+          }
+
+          write_waker.set_waker(cx.waker());
+          Poll::Pending
+        }
+        TlsStreamState::Open(stm) => stm.poll_flush(cx),
+        TlsStreamState::Closed => {
+          Poll::Ready(Err(ErrorKind::NotConnected.into()))
+        }
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+      };
     }
   }
 
@@ -675,6 +694,7 @@ pub(super) mod tests {
   use rustls::PrivateKey;
   use std::io::BufRead;
   use std::io::ErrorKind;
+  use std::io::IoSlice;
   use std::net::Ipv4Addr;
   use std::net::SocketAddr;
   use std::net::SocketAddrV4;
@@ -1372,6 +1392,47 @@ pub(super) mod tests {
     });
     a.await?;
     b.await?;
+    Ok(())
+  }
+
+  /// One byte read/write, don't check close.
+  #[rstest]
+  #[case(true, 1024, 1024, 1024)]
+  #[case(false, 1024, 1024, 1024)]
+  // Note that because we did the handshake first here, we lose a bit of buffer space due to
+  // TLS overhead on the first small write.
+  #[case(true, 1002, 16, 1024)]
+  #[case(false, 1024, 16, 1024)]
+  #[case(true, 1024, 10000, 1)]
+  #[case(false, 1024, 10000, 1)]
+  #[case(true, 32, 16, 16)]
+  #[case(false, 32, 16, 16)]
+  #[tokio::test]
+  async fn vectored_stream_write(
+    #[case] handshake_first: bool,
+    #[case] expected: usize,
+    #[case] first: usize,
+    #[case] second: usize,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_buffer_size(Some(NonZeroUsize::try_from(1024).unwrap())).await;
+    if handshake_first {
+      server.handshake().await.unwrap();
+      client.handshake().await.unwrap();
+    }
+    let n = client
+      .write_vectored(&[
+        IoSlice::new(&vec![1; first]),
+        IoSlice::new(&vec![2; second]),
+      ])
+      .await
+      .expect("failed to write");
+    assert_eq!(n, expected);
+    let mut buf = [0; 2048];
+    // Note that we need to flush to make progress on writes!
+    client.flush().await.expect("failed to flush");
+    let n = server.read(&mut buf).await.expect("failed to read");
+    assert_eq!(n, expected);
     Ok(())
   }
 
