@@ -1,3 +1,4 @@
+// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use std::num::NonZeroUsize;
 
 use fastwebsockets::FragmentCollectorRead;
@@ -13,19 +14,28 @@ const LARGE_PAYLOAD: [u8; 48 * 1024] = [0xff; 48 * 1024];
 const SMALL_PAYLOAD: [u8; 16] = [0xff; 16];
 
 #[rstest]
-#[case(false, false, false)]
-#[case(false, false, true)]
-#[case(false, true, false)]
-#[case(false, true, true)]
-#[case(true, false, false)]
-#[case(true, false, true)]
-#[case(true, true, false)]
-#[case(true, true, true)]
+#[case(false, false, false, false)]
+#[case(false, false, false, true)]
+#[case(false, false, true, false)]
+#[case(false, false, true, true)]
+#[case(false, true, false, false)]
+#[case(false, true, false, true)]
+#[case(false, true, true, false)]
+#[case(false, true, true, true)]
+#[case(true, false, false, false)]
+#[case(true, false, false, true)]
+#[case(true, false, true, false)]
+#[case(true, false, true, true)]
+#[case(true, true, false, false)]
+#[case(true, true, false, true)]
+#[case(true, true, true, false)]
+#[case(true, true, true, true)]
 #[tokio::test]
 async fn test_fastwebsockets(
   #[case] handshake: bool,
   #[case] buffer_limit: bool,
   #[case] large_payload: bool,
+  #[case] use_writev: bool,
 ) {
   let payload = if large_payload {
     LARGE_PAYLOAD.as_slice()
@@ -45,9 +55,13 @@ async fn test_fastwebsockets(
     server.handshake().await.expect("failed handshake");
   }
 
-  let a = tokio::spawn(async {
+  let a = tokio::spawn(async move {
     let mut ws = WebSocket::after_handshake(server, Role::Server);
     ws.set_auto_close(true);
+    if use_writev {
+      ws.set_writev(true);
+      ws.set_writev_threshold(0);
+    }
     for i in 0..1000 {
       println!("send {i}");
       ws.write_frame(Frame::binary(Payload::Borrowed(payload)))
@@ -62,8 +76,12 @@ async fn test_fastwebsockets(
     let frame = ws.read_frame().await.expect("failed to read");
     assert_eq!(frame.opcode, OpCode::Close);
   });
-  let b = tokio::spawn(async {
+  let b = tokio::spawn(async move {
     let mut ws = WebSocket::after_handshake(client, Role::Client);
+    if use_writev {
+      ws.set_writev(true);
+      ws.set_writev_threshold(0);
+    }
     ws.set_auto_close(true);
     for i in 0..1000 {
       println!("recv {i}");

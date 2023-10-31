@@ -1,3 +1,4 @@
+// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use rustls::Connection;
 use rustls::IoState;
 use std::io;
@@ -326,6 +327,44 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
+    self.poll_perform_write(cx, |tls| {
+      let n = tls.writer().write(buf).expect("Write will never fail");
+      trace!("w={n}");
+      assert!(n > 0);
+      n
+    })
+  }
+
+  pub fn poll_write_vectored(
+    &mut self,
+    cx: &mut Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> Poll<io::Result<usize>> {
+    // Zero-length writes always succeed
+    if bufs.is_empty() {
+      self.wr_waker.take();
+      return Poll::Ready(Ok(0));
+    }
+
+    self.poll_perform_write(cx, |tls| {
+      // TODO(mmastrac): we should manually write individual bufs here as rustls is not optimal if internal buffers are full
+      let n = tls
+        .writer()
+        .write_vectored(bufs)
+        .expect("Write will never fail");
+      trace!("w={n}");
+      assert!(n > 0);
+      n
+    })
+  }
+
+  /// Perform the common write steps required to prepare the connection and TLS state for a write (vectored or not) to happen.
+  #[inline(always)]
+  fn poll_perform_write(
+    &mut self,
+    cx: &mut Context<'_>,
+    f: impl Fn(&mut Connection) -> usize,
+  ) -> Poll<io::Result<usize>> {
     // Writes after shutdown return NotConnected
     if self.wants_close_sent {
       self.wr_waker.take();
@@ -347,9 +386,7 @@ impl ConnectionStream {
         // No current write interest, so let's generate some
         StreamProgress::NoInterest => {
           // Write it
-          let n = self.tls.writer().write(buf).expect("Write will never fail");
-          trace!("w={n}");
-          assert!(n > 0);
+          let n = f(&mut self.tls);
           // Drain what we can
           while self.poll_write_only(PollContext::Explicit(cx))
             == StreamProgress::MadeProgress
@@ -449,10 +486,14 @@ impl tokio::io::AsyncWrite for ConnectionStream {
 
   fn poll_write_vectored(
     self: Pin<&mut Self>,
-    _cx: &mut Context<'_>,
-    _bufs: &[futures::io::IoSlice<'_>],
+    cx: &mut Context<'_>,
+    bufs: &[futures::io::IoSlice<'_>],
   ) -> Poll<Result<usize, io::Error>> {
-    unimplemented!()
+    ConnectionStream::poll_write_vectored(self.get_mut(), cx, bufs)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    true
   }
 
   fn poll_flush(
@@ -484,7 +525,6 @@ mod tests {
   use rustls::ClientConnection;
   use rustls::ServerConnection;
   use std::time::Duration;
-
   use tokio::io::AsyncWriteExt;
   use tokio::spawn;
 

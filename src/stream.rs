@@ -1,19 +1,15 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
 use crate::connection_stream::ConnectionStream;
-
 use crate::handshake::handshake_task_internal;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
-
+use futures::task::noop_waker_ref;
 use futures::task::Context;
 use futures::task::Poll;
-
 use futures::task::Waker;
 use futures::FutureExt;
-
-use futures::task::noop_waker_ref;
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
@@ -24,22 +20,19 @@ use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
-use tokio::task::JoinError;
-
+use std::io::Write;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-
 use std::task::ready;
-
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
-
 use tokio::sync::watch;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Default)]
@@ -487,6 +480,7 @@ impl AsyncWrite for TlsStream {
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<io::Result<usize>> {
+    // NOTE: Changes to this method may need to be reflected in `poll_write_vectored`
     let buffer_size = self.buffer_size;
     loop {
       break match &mut self.state {
@@ -538,18 +532,104 @@ impl AsyncWrite for TlsStream {
     }
   }
 
+  fn poll_write_vectored(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> Poll<Result<usize, io::Error>> {
+    // NOTE: Changes to this method may need to be reflected in `poll_write`
+    let buffer_size = self.buffer_size;
+    loop {
+      break match &mut self.state {
+        TlsStreamState::Handshaking {
+          handle,
+          write_waker,
+          write_buf,
+          ..
+        } => {
+          // If the handshake completed, we want to finalize it and then continue
+          if handle.is_finished() {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
+              unreachable!()
+            };
+            self.finalize_handshake(res)?;
+            continue;
+          }
+          if let Some(buffer_size) = buffer_size {
+            let mut remaining = buffer_size.get() - write_buf.len();
+            if remaining == 0 {
+              // No room to write, so store the waker for whenever the handshake is done
+              write_waker.set_waker(cx.waker());
+              trace!("write limit");
+              Poll::Pending
+            } else {
+              trace!("write buf");
+              let mut wrote = 0;
+              for buf in bufs {
+                if buf.len() <= remaining {
+                  write_buf.extend_from_slice(buf);
+                  wrote += buf.len();
+                  remaining -= buf.len();
+                } else {
+                  write_buf.extend_from_slice(&buf[0..remaining]);
+                  wrote += remaining;
+                  break;
+                }
+              }
+
+              Poll::Ready(Ok(wrote))
+            }
+          } else {
+            trace!("write buf");
+            Poll::Ready(Ok(write_buf.write_vectored(bufs).unwrap()))
+          }
+        }
+        TlsStreamState::Open(ref mut stm) => stm.poll_write_vectored(cx, bufs),
+        TlsStreamState::Closed => {
+          Poll::Ready(Err(ErrorKind::NotConnected.into()))
+        }
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+      };
+    }
+  }
+
   fn poll_flush(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<io::Result<()>> {
-    match &mut self.state {
-      TlsStreamState::Handshaking { .. } => Poll::Ready(Ok(())),
-      TlsStreamState::Open(stm) => stm.poll_flush(cx),
-      TlsStreamState::Closed => {
-        Poll::Ready(Err(ErrorKind::NotConnected.into()))
-      }
-      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+    loop {
+      break match &mut self.state {
+        TlsStreamState::Handshaking {
+          write_waker,
+          handle,
+          ..
+        } => {
+          if handle.is_finished() {
+            let Poll::Ready(res) =
+              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
+            else {
+              unreachable!()
+            };
+            self.finalize_handshake(res)?;
+            continue;
+          }
+
+          write_waker.set_waker(cx.waker());
+          Poll::Pending
+        }
+        TlsStreamState::Open(stm) => stm.poll_flush(cx),
+        TlsStreamState::Closed => {
+          Poll::Ready(Err(ErrorKind::NotConnected.into()))
+        }
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+      };
     }
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    true
   }
 
   fn poll_shutdown(
@@ -603,6 +683,7 @@ impl Drop for TlsStream {
 #[cfg(test)]
 pub(super) mod tests {
   use super::*;
+  use crate::tests::expect_io_error;
   use futures::stream::FuturesUnordered;
   use futures::FutureExt;
   use futures::StreamExt;
@@ -613,6 +694,7 @@ pub(super) mod tests {
   use rustls::PrivateKey;
   use std::io::BufRead;
   use std::io::ErrorKind;
+  use std::io::IoSlice;
   use std::net::Ipv4Addr;
   use std::net::SocketAddr;
   use std::net::SocketAddrV4;
@@ -621,7 +703,6 @@ pub(super) mod tests {
   use tokio::io::AsyncWriteExt;
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
-
   use tokio::spawn;
 
   type TestResult = Result<(), std::io::Error>;
@@ -826,13 +907,6 @@ pub(super) mod tests {
     tls_pair_handshake_buffer_size(None, None).await
   }
 
-  fn expect_io_error<T: std::fmt::Debug>(
-    e: Result<T, io::Error>,
-    kind: io::ErrorKind,
-  ) {
-    assert_eq!(e.expect_err("Expected error").kind(), kind);
-  }
-
   async fn expect_eof_read(stm: &mut TlsStream) {
     let mut buf = [0_u8; 1];
     let e = stm.read(&mut buf).await.expect("Expected no error");
@@ -873,6 +947,19 @@ pub(super) mod tests {
     a.await?;
     b.await?;
 
+    Ok(())
+  }
+
+  /// Test that a flush before a handshake completes works.
+  #[tokio::test]
+  // #[ntest::timeout(60000)]
+  async fn test_flush_before_handshake() -> TestResult {
+    let (mut server, mut client) =
+      tls_pair().await;
+    server.write_all(b"hello?").await.unwrap();
+    server.flush().await.unwrap();
+    let mut buf = [0; 6];
+    assert_eq!(6, client.read_exact(&mut buf).await.unwrap());
     Ok(())
   }
 
@@ -1318,6 +1405,47 @@ pub(super) mod tests {
     });
     a.await?;
     b.await?;
+    Ok(())
+  }
+
+  /// One byte read/write, don't check close.
+  #[rstest]
+  #[case(true, 1024, 1024, 1024)]
+  #[case(false, 1024, 1024, 1024)]
+  // Note that because we did the handshake first here, we lose a bit of buffer space due to
+  // TLS overhead on the first small write.
+  #[case(true, 1002, 16, 1024)]
+  #[case(false, 1024, 16, 1024)]
+  #[case(true, 1024, 10000, 1)]
+  #[case(false, 1024, 10000, 1)]
+  #[case(true, 32, 16, 16)]
+  #[case(false, 32, 16, 16)]
+  #[tokio::test]
+  async fn vectored_stream_write(
+    #[case] handshake_first: bool,
+    #[case] expected: usize,
+    #[case] first: usize,
+    #[case] second: usize,
+  ) -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_buffer_size(Some(NonZeroUsize::try_from(1024).unwrap())).await;
+    if handshake_first {
+      server.handshake().await.unwrap();
+      client.handshake().await.unwrap();
+    }
+    let n = client
+      .write_vectored(&[
+        IoSlice::new(&vec![1; first]),
+        IoSlice::new(&vec![2; second]),
+      ])
+      .await
+      .expect("failed to write");
+    assert_eq!(n, expected);
+    let mut buf = [0; 2048];
+    // Note that we need to flush to make progress on writes!
+    client.flush().await.expect("failed to flush");
+    let n = server.read(&mut buf).await.expect("failed to read");
+    assert_eq!(n, expected);
     Ok(())
   }
 
