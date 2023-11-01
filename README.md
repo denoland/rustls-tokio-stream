@@ -2,6 +2,11 @@
 
 rustls-tokio-stream is a Rust crate that provides an AsyncRead/AsyncWrite interface for rustls.
 
+Features:
+
+ - Supports duplex I/O via `tokio::io::split` and other methods out-of-the-box
+ - Does not require either read or write polling to perform handshakes
+
 ## Examples
 
 Create a server and client running on localhost:
