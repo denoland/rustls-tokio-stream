@@ -98,6 +98,7 @@ impl Debug for TlsStream {
 #[derive(Clone, Debug)]
 pub struct TlsHandshake {
   pub alpn: Option<Vec<u8>>,
+  pub sni: Option<String>,
 }
 
 impl TlsStream {
@@ -126,7 +127,13 @@ impl TlsStream {
       match &res {
         Ok(res) => {
           let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
-          _ = tx.send(Some(Ok(TlsHandshake { alpn })));
+          let sni = match &res.1 {
+            Connection::Server(server) => {
+              server.server_name().map(|s| s.to_owned())
+            }
+            _ => None,
+          };
+          _ = tx.send(Some(Ok(TlsHandshake { alpn, sni })));
         }
         Err(err) => {
           let kind = err.kind();
@@ -801,6 +808,7 @@ pub(super) mod tests {
       .with_no_client_auth();
     config.alpn_protocols =
       alpn.iter().map(|v| v.as_bytes().to_owned()).collect();
+    config.enable_sni = true;
     config
   }
 
@@ -1003,6 +1011,7 @@ pub(super) mod tests {
     let a = spawn(async move {
       let handshake = server.handshake().await.unwrap();
       assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
+      assert_eq!(handshake.sni, Some("example.com".into()));
       server.write_all(b"hello?").await.unwrap();
       let mut buf = [0; 6];
       server.read_exact(&mut buf).await.unwrap();
