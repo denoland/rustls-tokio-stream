@@ -2,6 +2,7 @@
 use rustls::Connection;
 use std::io;
 use std::io::ErrorKind;
+use std::sync::Arc;
 
 use tokio::net::TcpStream;
 
@@ -10,7 +11,7 @@ use crate::adapter::write_tls;
 use crate::TestOptions;
 
 async fn try_read<'a, 'b>(
-  tcp: &'a mut TcpStream,
+  tcp: &'a TcpStream,
   tls: &'b mut Connection,
 ) -> io::Result<()> {
   match read_tls(tcp, tls) {
@@ -37,7 +38,7 @@ async fn try_read<'a, 'b>(
 }
 
 async fn try_write<'a, 'b>(
-  tcp: &'a mut TcpStream,
+  tcp: &'a TcpStream,
   tls: &'b mut Connection,
 ) -> io::Result<()> {
   match write_tls(tcp, tls) {
@@ -52,19 +53,41 @@ async fn try_write<'a, 'b>(
   Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) struct HandshakeResult(Arc<TcpStream>, pub Connection);
+
+impl HandshakeResult {
+  #[cfg(test)]
+  pub fn reclaim(self) -> (TcpStream, Connection) {
+    (
+      Arc::into_inner(self.0).expect("Failed to reclaim TCP"),
+      self.1,
+    )
+  }
+
+  pub fn reclaim2(self, tcp: Arc<TcpStream>) -> (TcpStream, Connection) {
+    drop(tcp);
+    (
+      Arc::into_inner(self.0).expect("Failed to reclaim TCP"),
+      self.1,
+    )
+  }
+}
+
 /// Performs a handshake and returns the [`TcpStream`]/[`Connection`] pair if successful.
-pub async fn handshake_task(
-  tcp: TcpStream,
+#[cfg(test)]
+pub(crate) async fn handshake_task(
+  tcp: Arc<TcpStream>,
   tls: Connection,
-) -> io::Result<(TcpStream, Connection)> {
+) -> io::Result<HandshakeResult> {
   handshake_task_internal(tcp, tls, TestOptions::default()).await
 }
 
 pub(crate) async fn handshake_task_internal(
-  mut tcp: TcpStream,
+  tcp: Arc<TcpStream>,
   mut tls: Connection,
   test_options: TestOptions,
-) -> io::Result<(TcpStream, Connection)> {
+) -> io::Result<HandshakeResult> {
   #[cfg(not(test))]
   {
     _ = test_options;
@@ -83,7 +106,7 @@ pub(crate) async fn handshake_task_internal(
       if test_options.slow_handshake_write {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      match try_write(&mut tcp, &mut tls).await {
+      match try_write(&tcp, &mut tls).await {
         Ok(()) => {}
         Err(err) => {
           struct WriteSink();
@@ -112,7 +135,7 @@ pub(crate) async fn handshake_task_internal(
             return Err(err);
           } else {
             // Not handshaking, no write interest, pretend we succeeded and pick up the error later.
-            return Ok((tcp, tls));
+            return Ok(HandshakeResult(tcp, tls));
           }
         }
       }
@@ -129,10 +152,10 @@ pub(crate) async fn handshake_task_internal(
       if test_options.slow_handshake_read {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      try_read(&mut tcp, &mut tls).await?;
+      try_read(&tcp, &mut tls).await?;
     }
   }
-  Ok((tcp, tls))
+  Ok(HandshakeResult(tcp, tls))
 }
 
 #[cfg(test)]
@@ -144,7 +167,7 @@ mod tests {
   use crate::tests::TestResult;
   use rustls::ClientConnection;
   use rustls::ServerConnection;
-  use tokio::spawn;
+  use tokio::task::spawn;
 
   #[tokio::test]
   async fn test_handshake() -> TestResult {
@@ -156,10 +179,10 @@ mod tests {
       ClientConnection::new(client_config().into(), server_name())
         .unwrap()
         .into();
-    let server = spawn(handshake_task(server, tls_server));
-    let client = spawn(handshake_task(client, tls_client));
-    let (tcp_client, tls_client) = client.await.unwrap().unwrap();
-    let (tcp_server, tls_server) = server.await.unwrap().unwrap();
+    let server = spawn(handshake_task(server.into(), tls_server));
+    let client = spawn(handshake_task(client.into(), tls_client));
+    let (tcp_client, tls_client) = client.await.unwrap().unwrap().reclaim();
+    let (tcp_server, tls_server) = server.await.unwrap().unwrap().reclaim();
     assert!(!tls_client.is_handshaking());
     assert!(!tls_server.is_handshaking());
     // Don't let these drop until the handshake finishes on both sides

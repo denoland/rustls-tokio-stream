@@ -2,6 +2,7 @@
 
 use crate::connection_stream::ConnectionStream;
 use crate::handshake::handshake_task_internal;
+use crate::handshake::HandshakeResult;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
@@ -55,10 +56,11 @@ enum TlsStreamState {
   /// If we are handshaking, writes are buffered and reads block.
   // TODO(mmastrac): We should be buffered in the Connection, not the Vec, as this results in a double-copy.
   Handshaking {
-    handle: JoinHandle<io::Result<(TcpStream, Connection)>>,
+    handle: JoinHandle<io::Result<HandshakeResult>>,
     read_waker: SharedWaker,
     write_waker: SharedWaker,
     write_buf: Vec<u8>,
+    tcp: Arc<TcpStream>,
   },
   /// The connection is open.
   Open(ConnectionStream),
@@ -106,12 +108,13 @@ impl TlsStream {
     test_options: TestOptions,
   ) -> Self {
     tls.set_buffer_limit(buffer_size.map(|s| s.get()));
-
     let (tx, handshake) = watch::channel(None);
     let read_waker = SharedWaker::default();
     let write_waker = SharedWaker::default();
     let read_waker_clone = read_waker.clone();
     let write_waker_clone = write_waker.clone();
+    let tcp = Arc::new(tcp);
+    let tcp_handshake = tcp.clone();
 
     // This task does nothing but yield a TlsHandshake to a oneshot
     let handle = spawn(async move {
@@ -119,7 +122,7 @@ impl TlsStream {
       if test_options.delay_handshake {
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
       }
-      let res = handshake_task_internal(tcp, tls, test_options).await;
+      let res = handshake_task_internal(tcp_handshake, tls, test_options).await;
       match &res {
         Ok(res) => {
           let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
@@ -144,6 +147,7 @@ impl TlsStream {
         read_waker,
         write_waker,
         write_buf: vec![],
+        tcp,
       },
       handshake,
       buffer_size,
@@ -253,24 +257,27 @@ impl TlsStream {
     }
   }
 
-  // pub fn into_split(self) -> (ReadHalf, WriteHalf) {
-  //   let shared = Shared::new(self);
-  //   let rd = ReadHalf {
-  //     shared: shared.clone(),
-  //   };
-  //   let wr = WriteHalf { shared };
-  //   (rd, wr)
-  // }
+  /// Returns the peer address of this socket.
+  pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().peer_addr(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.peer_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
 
-  // /// Convenience method to match [`TcpStream`].
-  // pub fn peer_addr(&self) -> Result<SocketAddr, io::Error> {
-  //   self.0.as_ref().unwrap().tcp.peer_addr()
-  // }
-
-  // /// Convenience method to match [`TcpStream`].
-  // pub fn local_addr(&self) -> Result<SocketAddr, io::Error> {
-  //   self.0.as_ref().unwrap().tcp.local_addr()
-  // }
+  /// Returns the local address of this socket.
+  pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().local_addr(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.local_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
 
   // /// Tokio-rustls compatibility: returns a reference to the underlying TCP
   // /// stream, and a reference to the Rustls `Connection` object.
@@ -295,16 +302,26 @@ impl TlsStream {
     }
   }
 
+  /// Try to get the handshake, if one exists.
+  pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
+    match &*self.handshake.borrow() {
+      None => Ok(None),
+      Some(Ok(r)) => Ok(Some(r.clone())),
+      Some(Err(e)) => Err(e.kind().into()),
+    }
+  }
+
   fn finalize_handshake(
     &mut self,
-    join_result: Result<io::Result<(TcpStream, Connection)>, JoinError>,
+    join_result: Result<io::Result<HandshakeResult>, JoinError>,
   ) -> io::Result<()> {
     trace!("finalize handshake");
-    match &mut self.state {
+    match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
       TlsStreamState::Handshaking {
         read_waker,
         write_waker,
         write_buf: buf,
+        tcp,
         ..
       } => {
         match join_result {
@@ -322,12 +339,13 @@ impl TlsStream {
             self.state = TlsStreamState::ClosedError(err.kind());
             Err(err)
           }
-          Ok(Ok((tcp, tls))) => {
+          Ok(Ok(result)) => {
+            let (tcp, tls) = result.reclaim2(tcp);
             let mut stm = ConnectionStream::new(tcp, tls);
             trace!("hs buf={}", buf.len());
             // We need to save all the data we wrote before the connection. The stream has an internal buffer
             // that matches our buffer, so it can accept it all.
-            stm.write_buf_fully(buf);
+            stm.write_buf_fully(&buf);
             read_waker.wake();
             write_waker.wake();
             self.state = TlsStreamState::Open(stm);
@@ -403,11 +421,13 @@ impl TlsStream {
         read_waker,
         write_waker,
         write_buf: buf,
+        tcp,
       } => {
         read_waker.wake();
         write_waker.wake();
         match handle.await {
-          Ok(Ok((tcp, tls))) => {
+          Ok(Ok(result)) => {
+            let (tcp, tls) = result.reclaim2(tcp);
             let mut stm = ConnectionStream::new(tcp, tls);
             poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
             poll_fn(|cx| stm.poll_shutdown(cx)).await?;
@@ -651,12 +671,16 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
-        handle, write_buf, ..
+        handle,
+        write_buf,
+        tcp,
+        ..
       } => {
         spawn(async move {
           trace!("in task");
           match handle.await {
-            Ok(Ok((tcp, tls))) => {
+            Ok(Ok(result)) => {
+              let (tcp, tls) = result.reclaim2(tcp);
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
@@ -711,6 +735,7 @@ pub(super) mod tests {
   use tokio::net::TcpListener;
   use tokio::net::TcpSocket;
   use tokio::spawn;
+  use tokio::sync::Barrier;
 
   type TestResult = Result<(), std::io::Error>;
 
@@ -1014,6 +1039,42 @@ pub(super) mod tests {
     b.await?;
 
     Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_peer_and_local_addresses() {
+    let (server, client) = tls_pair_slow_handshake(true, true, true).await;
+    // Use a barrier to keep the client and server sockets alive until the end
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_clone = barrier.clone();
+    let a = spawn(async move {
+      loop {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        server.local_addr().unwrap();
+        server.peer_addr().unwrap();
+        if server.try_handshake().unwrap().is_some() {
+          server.local_addr().unwrap();
+          server.peer_addr().unwrap();
+          break;
+        }
+      }
+      barrier.wait().await;
+    });
+    let b = spawn(async move {
+      loop {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        client.local_addr().unwrap();
+        client.peer_addr().unwrap();
+        if client.try_handshake().unwrap().is_some() {
+          client.local_addr().unwrap();
+          client.peer_addr().unwrap();
+          break;
+        }
+      }
+      barrier_clone.wait().await;
+    });
+    a.await.unwrap();
+    b.await.unwrap();
   }
 
   #[rstest]

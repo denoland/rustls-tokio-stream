@@ -100,6 +100,10 @@ impl ConnectionStream {
     (self.tcp, self.tls)
   }
 
+  pub(crate) fn tcp_stream(&self) -> &TcpStream {
+    &self.tcp
+  }
+
   #[cfg(test)]
   pub fn plaintext_bytes_to_read(&self) -> usize {
     self
@@ -123,7 +127,7 @@ impl ConnectionStream {
       StreamProgress::Error
     } else if self.tls.wants_read() {
       loop {
-        match read_tls(&mut self.tcp, &mut self.tls) {
+        match read_tls(&self.tcp, &mut self.tls) {
           Ok(n) => {
             if n == 0 {
               self.rd_error = Some(ErrorKind::UnexpectedEof);
@@ -169,7 +173,7 @@ impl ConnectionStream {
     } else if self.tls.wants_write() {
       loop {
         debug_assert!(self.tls.wants_write());
-        match write_tls(&mut self.tcp, &mut self.tls) {
+        match write_tls(&self.tcp, &mut self.tls) {
           Ok(n) => {
             assert!(n > 0);
             break StreamProgress::MadeProgress;
@@ -580,10 +584,10 @@ mod tests {
       ClientConnection::new(client_config().into(), server_name())
         .unwrap()
         .into();
-    let server = spawn(handshake_task(server, tls_server));
-    let client = spawn(handshake_task(client, tls_client));
-    let (tcp_client, tls_client) = client.await.unwrap().unwrap();
-    let (tcp_server, tls_server) = server.await.unwrap().unwrap();
+    let server = spawn(handshake_task(server.into(), tls_server));
+    let client = spawn(handshake_task(client.into(), tls_client));
+    let (tcp_client, tls_client) = client.await.unwrap().unwrap().reclaim();
+    let (tcp_server, tls_server) = server.await.unwrap().unwrap().reclaim();
     assert!(!tls_client.is_handshaking());
     assert!(!tls_server.is_handshaking());
 
