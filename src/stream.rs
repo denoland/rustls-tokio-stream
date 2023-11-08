@@ -99,6 +99,9 @@ impl Debug for TlsStream {
 pub struct TlsHandshake {
   pub alpn: Option<Vec<u8>>,
   pub sni: Option<String>,
+  /// For client-to-server connections, will always return true. For server-to-client connections, returns
+  /// true if the client provided a valid certificate.
+  pub has_peer_certificates: bool,
 }
 
 impl TlsStream {
@@ -126,6 +129,13 @@ impl TlsStream {
       let res = handshake_task_internal(tcp_handshake, tls, test_options).await;
       match &res {
         Ok(res) => {
+          // TODO(mmastrac): we should expose peer certificates _somehow_, but we need to solve the copy
+          // problem.
+          let has_peer_certificates = res
+            .1
+            .peer_certificates()
+            .map(|c| !c.is_empty())
+            .unwrap_or_default();
           let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
           let sni = match &res.1 {
             Connection::Server(server) => {
@@ -133,7 +143,11 @@ impl TlsStream {
             }
             _ => None,
           };
-          _ = tx.send(Some(Ok(TlsHandshake { alpn, sni })));
+          _ = tx.send(Some(Ok(TlsHandshake {
+            alpn,
+            sni,
+            has_peer_certificates,
+          })));
         }
         Err(err) => {
           let kind = err.kind();
