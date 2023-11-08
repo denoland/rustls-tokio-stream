@@ -22,7 +22,7 @@ fn trace_error(error: io::Error) -> io::Error {
   error
 }
 
-pub struct ImplementReadTrait<'a, T>(pub &'a mut T);
+pub struct ImplementReadTrait<'a, T>(pub &'a T);
 
 impl Read for ImplementReadTrait<'_, TcpStream> {
   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -36,7 +36,7 @@ impl Read for ImplementReadTrait<'_, TcpStream> {
   }
 }
 
-pub struct ImplementWriteTrait<'a, T>(pub &'a mut T);
+pub struct ImplementWriteTrait<'a, T>(pub &'a T);
 
 impl Write for ImplementWriteTrait<'_, TcpStream> {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -54,18 +54,12 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   }
 }
 
-pub fn read_tls(
-  tcp: &mut TcpStream,
-  tls: &mut Connection,
-) -> io::Result<usize> {
+pub fn read_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
   let mut read = ImplementReadTrait(tcp);
   tls.read_tls(&mut read)
 }
 
-pub fn write_tls(
-  tcp: &mut TcpStream,
-  tls: &mut Connection,
-) -> io::Result<usize> {
+pub fn write_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
   let mut write = ImplementWriteTrait(tcp);
   tls.write_tls(&mut write)
 }

@@ -8,7 +8,6 @@ mod stream;
 #[cfg(test)]
 mod system_test;
 
-pub use handshake::handshake_task;
 pub use stream::TlsHandshake;
 pub use stream::TlsStream;
 
