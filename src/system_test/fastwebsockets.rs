@@ -162,7 +162,6 @@ async fn test_fastwebsockets_split_echo() {
   b.await.expect("failed to join");
 }
 
-
 #[tokio::test]
 async fn test_fastwebsockets_split_ping_pong() {
   let (mut client, mut server) = crate::tests::tls_pair_buffer_size(Some(
@@ -180,7 +179,10 @@ async fn test_fastwebsockets_split_ping_pong() {
     let (mut rx, tx) = ws.split(tokio::io::split);
     let tx = std::sync::Arc::new(Mutex::new(tx));
     loop {
-      let frame = rx.read_frame::<_, WebSocketError>(&mut |_| async { unimplemented!() }).await.unwrap();
+      let frame = rx
+        .read_frame::<_, WebSocketError>(&mut |_| async { unimplemented!() })
+        .await
+        .unwrap();
       match frame.opcode {
         OpCode::Close => break,
         OpCode::Text | OpCode::Binary => {
@@ -189,7 +191,11 @@ async fn test_fastwebsockets_split_ping_pong() {
           let payload = frame.payload.to_vec();
           tokio::task::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            tx.lock().await.write_frame(Frame::binary(Payload::Owned(payload))).await.expect("Failed to write");
+            tx.lock()
+              .await
+              .write_frame(Frame::binary(Payload::Owned(payload)))
+              .await
+              .expect("Failed to write");
           });
         }
         _ => {}
