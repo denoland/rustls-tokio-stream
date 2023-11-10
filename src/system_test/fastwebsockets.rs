@@ -1,5 +1,6 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use fastwebsockets::FragmentCollectorRead;
 use fastwebsockets::Frame;
@@ -9,6 +10,7 @@ use fastwebsockets::Role;
 use fastwebsockets::WebSocket;
 use fastwebsockets::WebSocketError;
 use rstest::rstest;
+use tokio::sync::Mutex;
 
 const LARGE_PAYLOAD: [u8; 48 * 1024] = [0xff; 48 * 1024];
 const SMALL_PAYLOAD: [u8; 16] = [0xff; 16];
@@ -145,6 +147,82 @@ async fn test_fastwebsockets_split_echo() {
       tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
         .await
         .expect("Failed to write packet");
+      tx.write_frame(Frame::close(1000, &[]))
+        .await
+        .expect("Failed to write close");
+      println!("b2 ended");
+    });
+
+    b2.await.expect("failed to join");
+    b1.await.expect("failed to join");
+    println!("b ended");
+  });
+
+  a.await.expect("failed to join");
+  b.await.expect("failed to join");
+}
+
+
+#[tokio::test]
+async fn test_fastwebsockets_split_ping_pong() {
+  let (mut client, mut server) = crate::tests::tls_pair_buffer_size(Some(
+    NonZeroUsize::try_from(65536).unwrap(),
+  ))
+  .await;
+
+  client.handshake().await.expect("failed handshake");
+  server.handshake().await.expect("failed handshake");
+  println!("===handshakes done===");
+
+  let a = tokio::spawn(async {
+    let mut ws = WebSocket::after_handshake(server, Role::Server);
+    ws.set_auto_close(false);
+    let (mut rx, tx) = ws.split(tokio::io::split);
+    let tx = std::sync::Arc::new(Mutex::new(tx));
+    loop {
+      let frame = rx.read_frame::<_, WebSocketError>(&mut |_| async { unimplemented!() }).await.unwrap();
+      match frame.opcode {
+        OpCode::Close => break,
+        OpCode::Text | OpCode::Binary => {
+          println!("got frame");
+          let tx = tx.clone();
+          let payload = frame.payload.to_vec();
+          tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            tx.lock().await.write_frame(Frame::binary(Payload::Owned(payload))).await.expect("Failed to write");
+          });
+        }
+        _ => {}
+      }
+    }
+    println!("a ended");
+  });
+  let b = tokio::spawn(async {
+    let ws = WebSocket::after_handshake(client, Role::Client);
+    let (rx, mut tx) = ws.split(|ws| tokio::io::split(ws));
+    let mut rx = FragmentCollectorRead::new(rx);
+    let b1 = tokio::spawn(async move {
+      for i in 0..2 {
+        let frame = rx
+          .read_frame::<_, WebSocketError>(&mut |_| async { unimplemented!() })
+          .await
+          .expect("Failed to read");
+        assert_eq!(frame.payload.len(), 65000);
+      }
+      println!("b1 ended");
+    });
+
+    tokio::task::yield_now().await;
+
+    let b2 = tokio::spawn(async move {
+      tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
+        .await
+        .expect("Failed to write packet");
+      tokio::time::sleep(Duration::from_millis(200)).await;
+      tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
+        .await
+        .expect("Failed to write packet");
+      tokio::time::sleep(Duration::from_millis(200)).await;
       tx.write_frame(Frame::close(1000, &[]))
         .await
         .expect("Failed to write close");
