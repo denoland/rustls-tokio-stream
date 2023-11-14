@@ -854,6 +854,11 @@ pub struct TlsStreamRead {
 }
 
 impl TlsStreamRead {
+  /// Reunites with a previously split `TlsStreamWrite`.
+  pub fn unsplit(self, other: TlsStreamWrite) -> TlsStream {
+    self.r.unsplit(other.w)
+  }
+
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     let Some(tcp) = &self.tcp else {
