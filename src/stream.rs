@@ -78,10 +78,7 @@ pub type ServerConfigProvider = Arc<
   dyn Fn(
       ClientHello<'_>,
     ) -> Pin<
-      Box<
-        dyn Future<Output = Result<Arc<ServerConfig>, io::Error>>
-          + Send
-      >,
+      Box<dyn Future<Output = Result<Arc<ServerConfig>, io::Error>> + Send>,
     > + Send
     + Sync,
 >;
@@ -284,6 +281,9 @@ impl TlsStream {
     )
   }
 
+  /// Create a server-side TLS connection that provides the [`ServerConfig`] dynamically
+  /// based on the [`ClientHello`] message. This may be used to provide a different server
+  /// certificate or ALPN configuration depending on the requested hostname.
   pub fn new_server_side_acceptor(
     tcp: TcpStream,
     server_config_provider: ServerConfigProvider,
@@ -1173,9 +1173,14 @@ pub(super) mod tests {
   }
 
   /// Test that the handshake works, and we get the correct ALPN negotiated values.
+  #[rstest]
+  #[case("a")]
+  #[case("b")]
   #[tokio::test]
-  #[ntest::timeout(60000)]
-  async fn test_client_server_alpn_acceptor() -> TestResult {
+  // #[ntest::timeout(60000)]
+  async fn test_client_server_alpn_acceptor(
+    #[case] alpn: &'static str,
+  ) -> TestResult {
     let (mut server, mut client) = tls_pair_alpn_acceptor(
       |client_hello| {
         if let Some(alpn) = client_hello.alpn() {
@@ -1191,13 +1196,13 @@ pub(super) mod tests {
         &[]
       },
       None,
-      &["b"],
+      &[alpn],
       None,
     )
     .await;
     let a = spawn(async move {
       let handshake = server.handshake().await.unwrap();
-      assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
+      assert_eq!(handshake.alpn, Some(alpn.as_bytes().to_vec()));
       assert_eq!(handshake.sni, Some("example.com".into()));
       server.write_all(b"hello?").await.unwrap();
       let mut buf = [0; 6];
@@ -1206,7 +1211,7 @@ pub(super) mod tests {
     });
     let b = spawn(async move {
       let handshake = client.handshake().await.unwrap();
-      assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
+      assert_eq!(handshake.alpn, Some(alpn.as_bytes().to_vec()));
       client.write_all(b"hello!").await.unwrap();
       let mut buf = [0; 6];
       client.read_exact(&mut buf).await.unwrap();
