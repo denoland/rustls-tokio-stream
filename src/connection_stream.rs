@@ -6,6 +6,8 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::pin::Pin;
+use std::ptr::NonNull;
+use std::sync::Arc;
 use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
@@ -54,7 +56,9 @@ impl<'a, 'b: 'a> PollContext<'a, 'b> {
 
 pub struct ConnectionStream {
   tls: Connection,
-  tcp: TcpStream,
+  // TODO(mmastrac): This is kept as an Arc because we may need to split the TlsStream and may need it in
+  // multiple places. Instead, we should allow splitting the connection stream.
+  tcp: Arc<TcpStream>,
   last_iostate: Option<IoState>,
   /// If poll_shutdown has been called at least once
   wants_close_sent: bool,
@@ -81,7 +85,7 @@ enum StreamProgress {
 }
 
 impl ConnectionStream {
-  pub fn new(tcp: TcpStream, tls: Connection) -> Self {
+  pub fn new(tcp: Arc<TcpStream>, tls: Connection) -> Self {
     Self {
       tls,
       tcp,
@@ -97,10 +101,11 @@ impl ConnectionStream {
   }
 
   pub fn into_inner(self) -> (TcpStream, Connection) {
-    (self.tcp, self.tls)
+    // We always have a single refcount at this point
+    (Arc::try_unwrap(self.tcp).unwrap(), self.tls)
   }
 
-  pub(crate) fn tcp_stream(&self) -> &TcpStream {
+  pub(crate) fn tcp_stream(&self) -> &Arc<TcpStream> {
     &self.tcp
   }
 
@@ -462,7 +467,14 @@ impl ConnectionStream {
     ready!(self.poll_flush(cx))?;
     // Note that this is not technically an async call
     // TODO(mmastrac): This is currently untested
-    _ = Pin::new(&mut self.tcp).poll_shutdown(cx);
+    let tcp_ref: &TcpStream = &self.tcp;
+    // TODO(mmastrac): This should probably be done by going deeper into mio instead of this hackery
+    // SAFETY: We know that poll_shutdown never uses a mutable reference here
+    let mut tcp_ptr = unsafe {
+      NonNull::new(tcp_ref as *const _ as *mut TcpStream).unwrap_unchecked()
+    };
+    // SAFETY: We know that poll_shutdown never uses a mutable reference here
+    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
     Poll::Ready(Ok(()))
   }
 }
@@ -592,8 +604,8 @@ mod tests {
     assert!(!tls_server.is_handshaking());
 
     (
-      ConnectionStream::new(tcp_server, tls_server),
-      ConnectionStream::new(tcp_client, tls_client),
+      ConnectionStream::new(tcp_server.into(), tls_server),
+      ConnectionStream::new(tcp_client.into(), tls_client),
     )
   }
 
@@ -635,7 +647,7 @@ mod tests {
     expect_write_1(&mut client).await;
 
     // Half-close
-    client.tcp.shutdown().await?;
+    client.into_inner().0.shutdown().await?;
 
     // One byte will read fine
     expect_read_1(&mut server).await;
@@ -701,7 +713,9 @@ mod tests {
     expect_write_1(&mut client).await;
 
     // Half-close
-    client.tcp.shutdown().await?;
+    let (mut tcp, tls) = client.into_inner();
+    tcp.shutdown().await?;
+    let mut client = ConnectionStream::new(tcp.into(), tls);
 
     // One byte will read fine
     expect_read_1(&mut server).await;
@@ -728,7 +742,8 @@ mod tests {
     expect_read_1(&mut server).await;
 
     client
-      .tcp
+      .into_inner()
+      .0
       .write_all(b"THIS IS NOT A VALID TLS PACKET")
       .await?;
 
@@ -750,7 +765,8 @@ mod tests {
     assert_ne!(server.plaintext_bytes_to_read(), 0);
 
     client
-      .tcp
+      .into_inner()
+      .0
       .write_all(b"THIS IS NOT A VALID TLS PACKET")
       .await?;
 

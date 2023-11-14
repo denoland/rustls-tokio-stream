@@ -205,7 +205,7 @@ async fn test_fastwebsockets_split_ping_pong() {
   });
   let b = tokio::spawn(async {
     let ws = WebSocket::after_handshake(client, Role::Client);
-    let (rx, mut tx) = ws.split(|ws| tokio::io::split(ws));
+    let (rx, mut tx) = ws.split(|ws| ws.into_split());
     let mut rx = FragmentCollectorRead::new(rx);
     let b1 = tokio::spawn(async move {
       for _i in 0..2 {

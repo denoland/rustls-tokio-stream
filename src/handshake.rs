@@ -65,12 +65,18 @@ impl HandshakeResult {
     )
   }
 
+  // TODO(mmastrac): if we split ConnectionStream we can remove the Arc and use reclaim2
+  #[allow(unused)]
   pub fn reclaim2(self, tcp: Arc<TcpStream>) -> (TcpStream, Connection) {
     drop(tcp);
     (
       Arc::into_inner(self.0).expect("Failed to reclaim TCP"),
       self.1,
     )
+  }
+
+  pub fn into_inner(self) -> (Arc<TcpStream>, Connection) {
+    (self.0, self.1)
   }
 }
 

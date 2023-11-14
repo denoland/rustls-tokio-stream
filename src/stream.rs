@@ -325,6 +325,28 @@ impl TlsStream {
     }
   }
 
+  pub fn into_split(self) -> (TlsStreamRead, TlsStreamWrite) {
+    let handshake1 = self.handshake.clone();
+    let handshake2 = self.handshake.clone();
+    let tcp = match &self.state {
+      TlsStreamState::Handshaking { tcp, .. } => Some(tcp.clone()),
+      TlsStreamState::Open(conn) => Some(conn.tcp_stream().clone()),
+      _ => None,
+    };
+    let (r, w) = tokio::io::split(self);
+    let read = TlsStreamRead {
+      r,
+      handshake: handshake1,
+      tcp: tcp.clone(),
+    };
+    let write = TlsStreamWrite {
+      w,
+      handshake: handshake2,
+      tcp,
+    };
+    (read, write)
+  }
+
   pub async fn into_inner(mut self) -> io::Result<(TcpStream, Connection)> {
     poll_fn(|cx| self.poll_pending_handshake(cx)).await?;
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
@@ -364,10 +386,6 @@ impl TlsStream {
   //   (&inner.tcp, &inner.tls)
   // }
 
-  // fn inner_mut(&mut self) -> &mut TlsStreamInner {
-  //   self.0.as_mut().unwrap()
-  // }
-
   pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
     let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
@@ -399,7 +417,6 @@ impl TlsStream {
         read_waker,
         write_waker,
         write_buf: buf,
-        tcp,
         ..
       } => {
         match join_result {
@@ -418,7 +435,8 @@ impl TlsStream {
             Err(err)
           }
           Ok(Ok(result)) => {
-            let (tcp, tls) = result.reclaim2(tcp);
+            // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
+            let (tcp, tls) = result.into_inner();
             let mut stm = ConnectionStream::new(tcp, tls);
             trace!("hs buf={}", buf.len());
             // We need to save all the data we wrote before the connection. The stream has an internal buffer
@@ -499,13 +517,14 @@ impl TlsStream {
         read_waker,
         write_waker,
         write_buf: buf,
-        tcp,
+        ..
       } => {
         read_waker.wake();
         write_waker.wake();
         match handle.await {
           Ok(Ok(result)) => {
-            let (tcp, tls) = result.reclaim2(tcp);
+            // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
+            let (tcp, tls) = result.into_inner();
             let mut stm = ConnectionStream::new(tcp, tls);
             poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
             poll_fn(|cx| stm.poll_shutdown(cx)).await?;
@@ -790,16 +809,14 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
-        handle,
-        write_buf,
-        tcp,
-        ..
+        handle, write_buf, ..
       } => {
         spawn(async move {
           trace!("in task");
           match handle.await {
             Ok(Ok(result)) => {
-              let (tcp, tls) = result.reclaim2(tcp);
+              // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
+              let (tcp, tls) = result.into_inner();
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
@@ -827,6 +844,142 @@ impl Drop for TlsStream {
         // Nothing
       }
     }
+  }
+}
+
+pub struct TlsStreamRead {
+  r: tokio::io::ReadHalf<TlsStream>,
+  handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
+  tcp: Option<Arc<TcpStream>>,
+}
+
+impl TlsStreamRead {
+  /// Returns the peer address of this socket.
+  pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    let Some(tcp) = &self.tcp else {
+      return Err(std::io::ErrorKind::NotConnected.into());
+    };
+    tcp.peer_addr()
+  }
+
+  /// Returns the local address of this socket.
+  pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    let Some(tcp) = &self.tcp else {
+      return Err(std::io::ErrorKind::NotConnected.into());
+    };
+    tcp.local_addr()
+  }
+
+  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+    // TODO(mmastrac): Handshake shouldn't need to be cloned
+    let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
+      return Err(io::ErrorKind::NotConnected.into());
+    };
+    let handshake = handshake.as_ref().expect("Should be Some");
+    match handshake {
+      Ok(h) => Ok(h.clone()),
+      Err(err) => Err(err.kind().into()),
+    }
+  }
+
+  /// Try to get the handshake, if one exists.
+  pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
+    match &*self.handshake.borrow() {
+      None => Ok(None),
+      Some(Ok(r)) => Ok(Some(r.clone())),
+      Some(Err(e)) => Err(e.kind().into()),
+    }
+  }
+}
+
+impl AsyncRead for TlsStreamRead {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    Pin::new(&mut self.r).poll_read(cx, buf)
+  }
+}
+
+pub struct TlsStreamWrite {
+  w: tokio::io::WriteHalf<TlsStream>,
+  handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
+  tcp: Option<Arc<TcpStream>>,
+}
+
+impl TlsStreamWrite {
+  /// Returns the peer address of this socket.
+  pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    let Some(tcp) = &self.tcp else {
+      return Err(std::io::ErrorKind::NotConnected.into());
+    };
+    tcp.peer_addr()
+  }
+
+  /// Returns the local address of this socket.
+  pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    let Some(tcp) = &self.tcp else {
+      return Err(std::io::ErrorKind::NotConnected.into());
+    };
+    tcp.local_addr()
+  }
+
+  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+    // TODO(mmastrac): Handshake shouldn't need to be cloned
+    let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
+      return Err(io::ErrorKind::NotConnected.into());
+    };
+    let handshake = handshake.as_ref().expect("Should be Some");
+    match handshake {
+      Ok(h) => Ok(h.clone()),
+      Err(err) => Err(err.kind().into()),
+    }
+  }
+
+  /// Try to get the handshake, if one exists.
+  pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
+    match &*self.handshake.borrow() {
+      None => Ok(None),
+      Some(Ok(r)) => Ok(Some(r.clone())),
+      Some(Err(e)) => Err(e.kind().into()),
+    }
+  }
+}
+
+impl AsyncWrite for TlsStreamWrite {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<Result<usize, io::Error>> {
+    Pin::new(&mut self.w).poll_write(cx, buf)
+  }
+
+  fn poll_write_vectored(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    bufs: &[io::IoSlice<'_>],
+  ) -> Poll<Result<usize, io::Error>> {
+    Pin::new(&mut self.w).poll_write_vectored(cx, bufs)
+  }
+
+  fn poll_flush(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), io::Error>> {
+    Pin::new(&mut self.w).poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Result<(), io::Error>> {
+    Pin::new(&mut self.w).poll_shutdown(cx)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.w.is_write_vectored()
   }
 }
 
