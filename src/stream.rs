@@ -1,5 +1,6 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
+use crate::adapter::read_acceptor;
 use crate::connection_stream::ConnectionStream;
 use crate::handshake::handshake_task_internal;
 use crate::handshake::HandshakeResult;
@@ -10,7 +11,10 @@ use futures::task::noop_waker_ref;
 use futures::task::Context;
 use futures::task::Poll;
 use futures::task::Waker;
+use futures::Future;
 use futures::FutureExt;
+use rustls::server::Acceptor;
+use rustls::server::ClientHello;
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
@@ -70,6 +74,18 @@ enum TlsStreamState {
   ClosedError(ErrorKind),
 }
 
+pub type ServerConfigProvider = Arc<
+  dyn Fn(
+      ClientHello<'_>,
+    ) -> Pin<
+      Box<
+        dyn Future<Output = Result<Arc<ServerConfig>, io::Error>>
+          + Send
+      >,
+    > + Send
+    + Sync,
+>;
+
 pub struct TlsStream {
   state: TlsStreamState,
 
@@ -120,40 +136,68 @@ impl TlsStream {
     let tcp = Arc::new(tcp);
     let tcp_handshake = tcp.clone();
 
-    // This task does nothing but yield a TlsHandshake to a oneshot
     let handle = spawn(async move {
-      #[cfg(test)]
-      if test_options.delay_handshake {
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-      }
-      let res = handshake_task_internal(tcp_handshake, tls, test_options).await;
-      match &res {
-        Ok(res) => {
-          // TODO(mmastrac): we should expose peer certificates _somehow_, but we need to solve the copy
-          // problem.
-          let has_peer_certificates = res
-            .1
-            .peer_certificates()
-            .map(|c| !c.is_empty())
-            .unwrap_or_default();
-          let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
-          let sni = match &res.1 {
-            Connection::Server(server) => {
-              server.server_name().map(|s| s.to_owned())
-            }
-            _ => None,
-          };
-          _ = tx.send(Some(Ok(TlsHandshake {
-            alpn,
-            sni,
-            has_peer_certificates,
-          })));
+      let res = send_handshake(tcp_handshake, tls, test_options, tx).await;
+
+      // We may have read/writes blocked on the handshake, so wake them all up
+      read_waker_clone.wake();
+      write_waker_clone.wake();
+
+      res
+    });
+
+    Self {
+      state: TlsStreamState::Handshaking {
+        handle,
+        read_waker,
+        write_waker,
+        write_buf: vec![],
+        tcp,
+      },
+      handshake,
+      buffer_size,
+    }
+  }
+
+  fn new_server_acceptor(
+    tcp: TcpStream,
+    server_config_provider: ServerConfigProvider,
+    buffer_size: Option<NonZeroUsize>,
+    test_options: TestOptions,
+  ) -> Self {
+    let (tx, handshake) = watch::channel(None);
+    let read_waker = SharedWaker::default();
+    let write_waker = SharedWaker::default();
+    let read_waker_clone = read_waker.clone();
+    let write_waker_clone = write_waker.clone();
+    let tcp = Arc::new(tcp);
+    let tcp_handshake = tcp.clone();
+
+    let handle = spawn(async move {
+      let mut acceptor = Acceptor::default();
+      let tls = loop {
+        tcp_handshake.readable().await?;
+        read_acceptor(&tcp_handshake, &mut acceptor)?;
+        if let Some(accepted) = acceptor
+          .accept()
+          .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?
+        {
+          let f = server_config_provider(accepted.client_hello());
+          let config = f.await?;
+          let tls = accepted
+            .into_connection(config)
+            .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+          break tls;
         }
-        Err(err) => {
-          let kind = err.kind();
-          _ = tx.send(Some(Err(kind.into())));
-        }
-      }
+      };
+
+      let res = send_handshake(
+        tcp_handshake,
+        rustls::Connection::Server(tls),
+        test_options,
+        tx,
+      )
+      .await;
 
       // We may have read/writes blocked on the handshake, so wake them all up
       read_waker_clone.wake();
@@ -235,6 +279,19 @@ impl TlsStream {
     Self::new(
       tcp,
       Connection::Server(tls),
+      buffer_size,
+      TestOptions::default(),
+    )
+  }
+
+  pub fn new_server_side_acceptor(
+    tcp: TcpStream,
+    server_config_provider: ServerConfigProvider,
+    buffer_size: Option<NonZeroUsize>,
+  ) -> Self {
+    Self::new_server_acceptor(
+      tcp,
+      server_config_provider,
       buffer_size,
       TestOptions::default(),
     )
@@ -476,6 +533,47 @@ impl TlsStream {
 
     Ok(())
   }
+}
+
+async fn send_handshake(
+  tcp: Arc<TcpStream>,
+  tls: Connection,
+  test_options: TestOptions,
+  tx: watch::Sender<Option<Result<TlsHandshake, io::Error>>>,
+) -> Result<HandshakeResult, io::Error> {
+  #[cfg(test)]
+  if test_options.delay_handshake {
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+  }
+  let res = handshake_task_internal(tcp, tls, test_options).await;
+  match &res {
+    Ok(res) => {
+      // TODO(mmastrac): we should expose peer certificates _somehow_, but we need to solve the copy
+      // problem.
+      let has_peer_certificates = res
+        .1
+        .peer_certificates()
+        .map(|c| !c.is_empty())
+        .unwrap_or_default();
+      let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
+      let sni = match &res.1 {
+        Connection::Server(server) => {
+          server.server_name().map(|s| s.to_owned())
+        }
+        _ => None,
+      };
+      _ = tx.send(Some(Ok(TlsHandshake {
+        alpn,
+        sni,
+        has_peer_certificates,
+      })));
+    }
+    Err(err) => {
+      let kind = err.kind();
+      _ = tx.send(Some(Err(kind.into())));
+    }
+  }
+  res
 }
 
 impl AsyncRead for TlsStream {
@@ -940,6 +1038,36 @@ pub(super) mod tests {
     (server, client)
   }
 
+  async fn make_config(
+    alpn: &'static [&'static str],
+  ) -> Result<Arc<ServerConfig>, io::Error> {
+    Ok(server_config(alpn).into())
+  }
+
+  async fn tls_pair_alpn_acceptor(
+    server_alpn: fn(ClientHello) -> &'static [&'static str],
+    server_buffer_size: Option<NonZeroUsize>,
+    client_alpn: &[&str],
+    client_buffer_size: Option<NonZeroUsize>,
+  ) -> (TlsStream, TlsStream) {
+    let (server, client) = tcp_pair().await;
+    let server = TlsStream::new_server_side_acceptor(
+      server,
+      Arc::new(move |client_hello| {
+        Box::pin(make_config(server_alpn(client_hello)))
+      }),
+      server_buffer_size,
+    );
+    let client = TlsStream::new_client_side(
+      client,
+      client_config(client_alpn).into(),
+      "example.com".try_into().unwrap(),
+      client_buffer_size,
+    );
+
+    (server, client)
+  }
+
   async fn tls_pair_handshake_buffer_size(
     server_buffer_size: Option<NonZeroUsize>,
     client_buffer_size: Option<NonZeroUsize>,
@@ -1022,6 +1150,51 @@ pub(super) mod tests {
   async fn test_client_server_alpn() -> TestResult {
     let (mut server, mut client) =
       tls_pair_alpn(&["a", "b", "c"], None, &["b"], None).await;
+    let a = spawn(async move {
+      let handshake = server.handshake().await.unwrap();
+      assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
+      assert_eq!(handshake.sni, Some("example.com".into()));
+      server.write_all(b"hello?").await.unwrap();
+      let mut buf = [0; 6];
+      server.read_exact(&mut buf).await.unwrap();
+      assert_eq!(buf.as_slice(), b"hello!");
+    });
+    let b = spawn(async move {
+      let handshake = client.handshake().await.unwrap();
+      assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));
+      client.write_all(b"hello!").await.unwrap();
+      let mut buf = [0; 6];
+      client.read_exact(&mut buf).await.unwrap();
+    });
+    a.await?;
+    b.await?;
+
+    Ok(())
+  }
+
+  /// Test that the handshake works, and we get the correct ALPN negotiated values.
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_client_server_alpn_acceptor() -> TestResult {
+    let (mut server, mut client) = tls_pair_alpn_acceptor(
+      |client_hello| {
+        if let Some(alpn) = client_hello.alpn() {
+          for alpn in alpn {
+            if alpn == b"a" {
+              return &["a"];
+            }
+            if alpn == b"b" {
+              return &["b"];
+            }
+          }
+        }
+        &[]
+      },
+      None,
+      &["b"],
+      None,
+    )
+    .await;
     let a = spawn(async move {
       let handshake = server.handshake().await.unwrap();
       assert_eq!(handshake.alpn, Some("b".as_bytes().to_vec()));

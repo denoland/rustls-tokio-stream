@@ -1,5 +1,6 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use crate::trace;
+use rustls::server::Acceptor;
 use rustls::Connection;
 use std::io;
 use std::io::ErrorKind;
@@ -62,4 +63,12 @@ pub fn read_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
 pub fn write_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
   let mut write = ImplementWriteTrait(tcp);
   tls.write_tls(&mut write)
+}
+
+pub fn read_acceptor(
+  tcp: &TcpStream,
+  acceptor: &mut Acceptor,
+) -> io::Result<usize> {
+  let mut read = ImplementReadTrait(tcp);
+  acceptor.read_tls(&mut read)
 }

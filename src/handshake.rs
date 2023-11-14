@@ -10,7 +10,7 @@ use crate::adapter::read_tls;
 use crate::adapter::write_tls;
 use crate::TestOptions;
 
-async fn try_read<'a, 'b>(
+fn try_read<'a, 'b>(
   tcp: &'a TcpStream,
   tls: &'b mut Connection,
 ) -> io::Result<()> {
@@ -30,14 +30,14 @@ async fn try_read<'a, 'b>(
     err @ Err(_) => {
       // If we failed to read, try a last-gasp write to send a reason to the other side. This behaves in the
       // same way that the rustls Connection::complete_io() method would.
-      _ = try_write(tcp, tls).await;
+      _ = try_write(tcp, tls);
       err?;
     }
   }
   Ok(())
 }
 
-async fn try_write<'a, 'b>(
+fn try_write<'a, 'b>(
   tcp: &'a TcpStream,
   tls: &'b mut Connection,
 ) -> io::Result<()> {
@@ -106,7 +106,7 @@ pub(crate) async fn handshake_task_internal(
       if test_options.slow_handshake_write {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      match try_write(&tcp, &mut tls).await {
+      match try_write(&tcp, &mut tls) {
         Ok(()) => {}
         Err(err) => {
           struct WriteSink();
@@ -152,7 +152,7 @@ pub(crate) async fn handshake_task_internal(
       if test_options.slow_handshake_read {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      try_read(&tcp, &mut tls).await?;
+      try_read(&tcp, &mut tls)?;
     }
   }
   Ok(HandshakeResult(tcp, tls))
