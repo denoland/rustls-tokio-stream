@@ -208,7 +208,7 @@ async fn test_fastwebsockets_split_ping_pong() {
     let (rx, mut tx) = ws.split(|ws| tokio::io::split(ws));
     let mut rx = FragmentCollectorRead::new(rx);
     let b1 = tokio::spawn(async move {
-      for i in 0..2 {
+      for _i in 0..2 {
         let frame = rx
           .read_frame::<_, WebSocketError>(&mut |_| async { unimplemented!() })
           .await
