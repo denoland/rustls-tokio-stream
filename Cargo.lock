@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-tokio-stream"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "fastwebsockets",
  "futures",
