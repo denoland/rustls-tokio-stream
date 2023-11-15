@@ -34,6 +34,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::ready;
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
@@ -827,6 +828,7 @@ impl Drop for TlsStream {
         spawn(async move {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
+          _ = stm.tcp_stream().set_linger(Some(Duration::from_secs(10)));
           trace!("{:?}", res);
           trace!("done drop task");
         });

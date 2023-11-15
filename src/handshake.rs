@@ -139,7 +139,7 @@ async fn handshake_task_internal(
             }
           }
 
-          // return Err(err);
+          trace!("handshake error = {err:?}");
 
           // This is a bit of sleight-of-hand: if the handshake fails to write because the other side is gone
           // or otherwise errors, _BUT_ writing takes us out of handshaking mode, we treat this as a successful
