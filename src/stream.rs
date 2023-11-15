@@ -1862,11 +1862,11 @@ pub(super) mod tests {
       let (mut r, _w) = client.into_split();
       let mut buf = vec![0; BUF_SIZE];
       for i in 0..BUF_COUNT {
-        assert_eq!(
-          BUF_SIZE,
-          r.read_exact(&mut buf).await.unwrap(),
-          "Failed to read after {i} of {BUF_COUNT} reads"
-        );
+        let r = r.read_exact(&mut buf).await;
+        if let Err(e) = &r {
+          panic!("Failed to read after {i} of {BUF_COUNT} reads: {e:?}");
+        };
+        assert_eq!(BUF_SIZE, r.unwrap());
       }
       expect_eof_read(&mut r).await;
     });
