@@ -21,9 +21,9 @@ fn trace_result<T>(result: io::Result<T>) -> io::Result<T> {
   result
 }
 
-fn try_read<'a, 'b>(
-  tcp: &'a TcpStream,
-  tls: &'b mut Connection,
+fn try_read(
+  tcp: &TcpStream,
+  tls: &mut Connection,
 ) -> io::Result<()> {
   match read_tls(tcp, tls) {
     Ok(0) => {
@@ -43,9 +43,9 @@ fn try_read<'a, 'b>(
   Ok(())
 }
 
-fn try_write<'a, 'b>(
-  tcp: &'a TcpStream,
-  tls: &'b mut Connection,
+fn try_write(
+  tcp: &TcpStream,
+  tls: &mut Connection,
 ) -> io::Result<()> {
   match write_tls(tcp, tls) {
     Ok(_) => {}

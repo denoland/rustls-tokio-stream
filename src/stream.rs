@@ -352,7 +352,7 @@ impl TlsStream {
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
       TlsStreamState::Open(stm) => Ok(stm.into_inner()),
       TlsStreamState::Closed => Err(ErrorKind::NotConnected.into()),
-      TlsStreamState::ClosedError(err) => Err(err.into()),
+      TlsStreamState::ClosedError(err) => Err(err),
       TlsStreamState::Handshaking { .. } => unreachable!(),
     }
   }
@@ -782,7 +782,7 @@ impl AsyncWrite for TlsStream {
         TlsStreamState::Closed => {
           Poll::Ready(Err(ErrorKind::NotConnected.into()))
         }
-        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(&err))),
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(err))),
       };
     }
   }

@@ -782,7 +782,7 @@ mod tests {
       total += n.unwrap();
     }
 
-    server.tls.writer().write(b"final")?;
+    _ = server.tls.writer().write(b"final")?;
     let iostate = server.tls.process_new_packets().unwrap();
 
     assert!(iostate.tls_bytes_to_write() > 0);
@@ -820,7 +820,7 @@ mod tests {
       total += n.unwrap();
     }
 
-    server.tls.writer().write(b"final")?;
+    _ = server.tls.writer().write(b"final")?;
     let iostate = server.tls.process_new_packets().unwrap();
 
     assert!(iostate.tls_bytes_to_write() > 0);

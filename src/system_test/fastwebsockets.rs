@@ -130,7 +130,7 @@ async fn test_fastwebsockets_split_echo() {
   });
   let b = tokio::spawn(async {
     let ws = WebSocket::after_handshake(client, Role::Client);
-    let (rx, mut tx) = ws.split(|ws| tokio::io::split(ws));
+    let (rx, mut tx) = ws.split(tokio::io::split);
     let mut rx = FragmentCollectorRead::new(rx);
     let b1 = tokio::spawn(async move {
       let frame = rx
@@ -144,7 +144,7 @@ async fn test_fastwebsockets_split_echo() {
     tokio::task::yield_now().await;
 
     let b2 = tokio::spawn(async move {
-      tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
+      tx.write_frame(Frame::binary(Payload::Owned(vec![b'a'; 65000])))
         .await
         .expect("Failed to write packet");
       tx.write_frame(Frame::close(1000, &[]))
@@ -221,11 +221,11 @@ async fn test_fastwebsockets_split_ping_pong() {
     tokio::task::yield_now().await;
 
     let b2 = tokio::spawn(async move {
-      tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
+      tx.write_frame(Frame::binary(Payload::Owned(vec![b'a'; 65000])))
         .await
         .expect("Failed to write packet");
       tokio::time::sleep(Duration::from_millis(200)).await;
-      tx.write_frame(Frame::binary(Payload::Owned(vec!['a' as u8; 65000])))
+      tx.write_frame(Frame::binary(Payload::Owned(vec![b'a'; 65000])))
         .await
         .expect("Failed to write packet");
       tokio::time::sleep(Duration::from_millis(200)).await;
