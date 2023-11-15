@@ -1861,8 +1861,12 @@ pub(super) mod tests {
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
       let mut buf = vec![0; BUF_SIZE];
-      for _i in 0..BUF_COUNT {
-        assert_eq!(BUF_SIZE, r.read_exact(&mut buf).await.unwrap());
+      for i in 0..BUF_COUNT {
+        assert_eq!(
+          BUF_SIZE,
+          r.read_exact(&mut buf).await.unwrap(),
+          "Failed to read after {i} of {BUF_COUNT} reads"
+        );
       }
       expect_eof_read(&mut r).await;
     });
