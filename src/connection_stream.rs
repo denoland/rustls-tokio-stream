@@ -647,13 +647,16 @@ mod tests {
     expect_write_1(&mut client).await;
 
     // Half-close
-    client.into_inner().0.shutdown().await?;
+    let mut tcp = client.into_inner().0;
+    tcp.shutdown().await?;
 
     // One byte will read fine
     expect_read_1(&mut server).await;
 
     // The next byte will return UnexpectedEof
     expect_read_1_err(&mut server, ErrorKind::UnexpectedEof).await;
+
+    drop(tcp);
 
     Ok(())
   }
@@ -741,14 +744,15 @@ mod tests {
     // One byte will read fine
     expect_read_1(&mut server).await;
 
-    client
-      .into_inner()
-      .0
-      .write_all(b"THIS IS NOT A VALID TLS PACKET")
-      .await?;
+    let mut tcp = client.into_inner().0;
+    tcp.write_all(b"THIS IS NOT A VALID TLS PACKET").await?;
 
     // The next byte will not
     expect_read_1_err(&mut server, ErrorKind::InvalidData).await;
+
+    // Hold the TCP connection until here otherwise Windows/Mac may barf
+    drop(tcp);
+
     Ok(())
   }
 
@@ -773,7 +777,7 @@ mod tests {
     // The next byte will not
     expect_read_1_err(&mut server, ErrorKind::InvalidData).await;
 
-    // Hold the TCP connection until here otherwise Windows may barf
+    // Hold the TCP connection until here otherwise Windows/Mac may barf
     drop(tcp);
 
     Ok(())
