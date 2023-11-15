@@ -379,13 +379,6 @@ impl TlsStream {
     }
   }
 
-  // /// Tokio-rustls compatibility: returns a reference to the underlying TCP
-  // /// stream, and a reference to the Rustls `Connection` object.
-  // pub fn get_ref(&self) -> (&TcpStream, &Connection) {
-  //   let inner = self.0.as_ref().unwrap();
-  //   (&inner.tcp, &inner.tls)
-  // }
-
   pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
     let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
@@ -1822,11 +1815,10 @@ pub(super) mod tests {
   async fn large_transfer_with_buffer_limit_split(
     #[case] swap: bool,
   ) -> TestResult {
-    const BUF_SIZE: usize = 10 * 1024;
-    const BUF_COUNT: usize = 1024;
+    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_COUNT: usize = 10;
 
-    let (server, client) = tls_pair_buffer_size(BUF_SIZE.try_into().ok()).await;
-
+    let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
     let (server, client) = if swap {
       (client, server)
     } else {
@@ -1835,27 +1827,36 @@ pub(super) mod tests {
 
     let a = spawn(async move {
       let (mut r, mut w) = server.into_split();
+      let barrier = Arc::new(Barrier::new(2));
+      let barrier2 = barrier.clone();
       let a = spawn(async move {
-        timeout(Duration::from_millis(1), r.read_u8())
-          .await
-          .expect_err("");
+        // We want to register a read here to test whether the split read stomps over a write on
+        // the other half.
+        tokio::select! {
+          x = r.read_u8() => { _ = x.expect_err("should have failed") },
+          _ = barrier.wait() => {}
+        };
+        r
       });
       let b = spawn(async move {
         // Heap allocate a large buffer and send it
         let buf = vec![42; BUF_COUNT * BUF_SIZE];
+        w.handshake().await.unwrap();
         w.write_all(&buf).await.unwrap();
         w.flush().await.unwrap();
         w.shutdown().await.unwrap();
+        barrier2.wait().await;
+        w
       });
 
-      a.await.unwrap();
-      b.await.unwrap();
+      let r = a.await.unwrap();
+      let w = b.await.unwrap();
+      r.unsplit(w).close().await.unwrap();
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
-      for _ in 0..BUF_COUNT {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-        let mut buf = [0; BUF_SIZE];
+      let mut buf = vec![0; BUF_SIZE];
+      for _i in 0..BUF_COUNT {
         assert_eq!(BUF_SIZE, r.read_exact(&mut buf).await.unwrap());
       }
       expect_eof_read(&mut r).await;
