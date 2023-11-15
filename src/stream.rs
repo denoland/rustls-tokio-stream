@@ -1830,6 +1830,8 @@ pub(super) mod tests {
       let barrier = Arc::new(Barrier::new(2));
       let barrier2 = barrier.clone();
       let a = spawn(async move {
+        // We want to register a read here to test whether the split read stomps over a write on
+        // the other half.
         tokio::select! {
           x = r.read_u8() => { _ = x.expect_err("should have failed") },
           _ = barrier.wait() => {}
