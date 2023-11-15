@@ -36,6 +36,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::ready;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
@@ -836,7 +837,9 @@ impl Drop for TlsStream {
               trace!("shutdown handshake {:?}", res);
               spawn_blocking(move || {
                 // Drop the TCP stream here just in case close() blocks
+                let now = Instant::now();
                 drop(stm);
+                eprintln!("drop finished after {:?}", now.elapsed());
               });
             }
             x @ Err(_) => {
