@@ -35,6 +35,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::ready;
+use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::io::AsyncRead;
@@ -864,6 +865,7 @@ impl Drop for TlsStream {
           spawn_blocking(move || {
             // Drop the TCP stream here just in case close() blocks
             let now = Instant::now();
+            sleep(Duration::from_secs(1));
             let (tcp, tls) = stm.into_inner();
             let tcp2 = tcp.into_std().unwrap().set_nonblocking(false);
             eprintln!("drop finished after {:?}", now.elapsed());
