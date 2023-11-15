@@ -824,14 +824,14 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
-        handle, write_buf, ..
+        handle, write_buf, tcp, ..
       } => {
         spawn(async move {
           trace!("in drop task");
           match handle.await {
             Ok(Ok(result)) => {
               // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
-              let (tcp, tls) = result.into_inner();
+              let (tcp2, tls) = result.into_inner();
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
@@ -840,7 +840,7 @@ impl Drop for TlsStream {
                 // Drop the TCP stream here just in case close() blocks
                 let now = Instant::now();
                 drop(stm);
-                drop(tcp);
+                drop(tcp2);
                 eprintln!("drop finished after {:?}", now.elapsed());
               });
             }
