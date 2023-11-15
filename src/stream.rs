@@ -1827,7 +1827,7 @@ pub(super) mod tests {
 
     let (server, client) = tls_pair_buffer_size(BUF_SIZE.try_into().ok()).await;
 
-    let (server, mut client) = if swap {
+    let (server, client) = if swap {
       (client, server)
     } else {
       (server, client)
@@ -1844,6 +1844,7 @@ pub(super) mod tests {
         // Heap allocate a large buffer and send it
         let buf = vec![42; BUF_COUNT * BUF_SIZE];
         w.write_all(&buf).await.unwrap();
+        w.flush().await.unwrap();
         w.shutdown().await.unwrap();
       });
 
