@@ -92,7 +92,19 @@ pub(crate) async fn handshake_task(
   tcp: Arc<TcpStream>,
   tls: Connection,
 ) -> io::Result<HandshakeResult> {
-  handshake_task_internal(tcp, tls, TestOptions::default()).await
+  let res = handshake_task_internal(tcp, tls, TestOptions::default()).await;
+  // Ensure consistency in handshake errors
+  match res {
+    #[cfg(windows)]
+    Err(err) if err.kind() == ErrorKind::ConnectionAborted => {
+      Err(ErrorKind::UnexpectedEof.into())
+    }
+    #[cfg(target_os = "macos")]
+    Err(err) if err.kind() == ErrorKind::ConnectionReset => {
+      Err(ErrorKind::UnexpectedEof.into())
+    }
+    r => r,
+  }
 }
 
 pub(crate) async fn handshake_task_internal(

@@ -1707,23 +1707,13 @@ pub(super) mod tests {
   #[tokio::test]
   async fn test_server_crash_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_with_tcp_server(false).await;
-    // This test occasionally shows up as ConnectionReset on Mac -- the delay ensures we wait long enough
-    // for the handshake to settle.
-    tokio::time::sleep(Duration::from_millis(100)).await;
     server.shutdown().await?;
     drop(server);
 
-    let expected = if cfg!(target_os = "windows") {
-      ErrorKind::ConnectionAborted
-    } else if cfg!(target_os = "macos") {
-      // TODO(mmastrac): this is occasionally `UnexpectedEof` on mac
-      ErrorKind::ConnectionReset
-    } else {
-      ErrorKind::UnexpectedEof
-    };
+    let expected = ErrorKind::UnexpectedEof;
+
     expect_io_error(client.handshake().await, expected);
-    // Can't read -- server shut down. Because this happened before the handshake, we get the underlying
-    // error here.
+    // Can't read -- server shut down. Because this happened before the handshake, it's an unexpected EOF.
     expect_io_error_read(&mut client, expected).await;
     Ok(())
   }
