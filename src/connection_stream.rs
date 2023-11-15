@@ -388,12 +388,14 @@ impl ConnectionStream {
         StreamProgress::NoInterest => {
           // Write it
           let n = f(&mut self.tls);
-          // Drain what we can
-          while self.poll_write_only(PollContext::Explicit(cx))
-            == StreamProgress::MadeProgress
-          {}
-          // And then return what we wrote
-          break Poll::Ready(Ok(n));
+          // Drain what we can, and then return what we wrote
+          break loop {
+            break match self.poll_write_only(PollContext::Explicit(cx)) {
+              StreamProgress::MadeProgress => continue,
+              StreamProgress::RegisteredWaker if flushing => Poll::Pending,
+              _ => Poll::Ready(Ok(n)),
+            }
+          }
         }
       };
     };
@@ -443,11 +445,13 @@ impl ConnectionStream {
     // Immediate state change so we can error writes
     self.wants_close_sent = true;
     if !self.close_sent {
-      ready!(self.poll_flush(cx))?;
       self.tls.send_close_notify();
       self.close_sent = true;
     }
-    ready!(self.poll_flush(cx))?;
+
+    // Don't shut down until we've flushed CloseNotify
+    ready!(self.poll_flush(cx)?);
+
     // Note that this is not technically an async call
     // TODO(mmastrac): This is currently untested
     let tcp_ref: &TcpStream = &self.tcp;
