@@ -24,6 +24,7 @@ use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
+use tokio::task::spawn_blocking;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
@@ -833,6 +834,10 @@ impl Drop for TlsStream {
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
               trace!("shutdown handshake {:?}", res);
+              spawn_blocking(move || {
+                // Drop the TCP stream here just in case close() blocks
+                drop(stm);
+              });
             }
             x @ Err(_) => {
               trace!("{x:?}");
