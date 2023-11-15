@@ -840,6 +840,7 @@ impl Drop for TlsStream {
                 // Drop the TCP stream here just in case close() blocks
                 let now = Instant::now();
                 drop(stm);
+                let tcp2 = Arc::try_unwrap(tcp2).unwrap().into_std().unwrap().set_nonblocking(false);
                 drop(tcp2);
                 eprintln!("drop finished after {:?}", now.elapsed());
               });
@@ -863,7 +864,8 @@ impl Drop for TlsStream {
           spawn_blocking(move || {
             // Drop the TCP stream here just in case close() blocks
             let now = Instant::now();
-            drop(stm);
+            let (tcp, tls) = stm.into_inner();
+            let tcp2 = tcp.into_std().unwrap().set_nonblocking(false);
             eprintln!("drop finished after {:?}", now.elapsed());
           });
         });
