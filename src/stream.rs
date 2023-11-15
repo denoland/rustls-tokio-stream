@@ -29,7 +29,6 @@ use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
-use std::mem::ManuallyDrop;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -37,7 +36,6 @@ use std::sync::Arc;
 use std::task::ready;
 use std::thread::sleep;
 use std::time::Duration;
-use std::time::Instant;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
@@ -831,20 +829,24 @@ impl Drop for TlsStream {
           trace!("in drop task");
           match handle.await {
             Ok(Ok(result)) => {
+              drop(tcp);
               // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
-              let (tcp2, tls) = result.into_inner();
+              let (tcp, tls) = result.into_inner();
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
               trace!("shutdown handshake {:?}", res);
-              spawn_blocking(move || {
-                // Drop the TCP stream here just in case close() blocks
-                let now = Instant::now();
-                drop(stm);
-                let tcp2 = Arc::try_unwrap(tcp2).unwrap().into_std().unwrap().set_nonblocking(false);
-                drop(tcp2);
-                eprintln!("drop finished after {:?}", now.elapsed());
-              });
+              let (tcp, _) = stm.into_inner();
+              if let Ok(tcp) = tcp.into_std() {
+                spawn_blocking(move || {
+                  trace!("in drop tcp task");
+                  // Drop the TCP stream here just in case close() blocks
+                  _ = tcp.set_nonblocking(false);
+                  sleep(Duration::from_secs(1));
+                  drop(tcp);
+                  trace!("done drop tcp task");
+                });
+              }
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -861,15 +863,18 @@ impl Drop for TlsStream {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("shutdown open {:?}", res);
+          let (tcp, _) = stm.into_inner();
+          if let Ok(tcp) = tcp.into_std() {
+            spawn_blocking(move || {
+              trace!("in drop tcp task");
+              // Drop the TCP stream here just in case close() blocks
+              _ = tcp.set_nonblocking(false);
+              sleep(Duration::from_secs(1));
+              drop(tcp);
+              trace!("done drop tcp task");
+            });
+          }
           trace!("done drop task");
-          spawn_blocking(move || {
-            // Drop the TCP stream here just in case close() blocks
-            let now = Instant::now();
-            sleep(Duration::from_secs(1));
-            let (tcp, tls) = stm.into_inner();
-            let tcp2 = tcp.into_std().unwrap().set_nonblocking(false);
-            eprintln!("drop finished after {:?}", now.elapsed());
-          });
         });
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
