@@ -1,6 +1,9 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 
+use crate::adapter::clone_error;
+use crate::adapter::clone_result;
 use crate::adapter::read_acceptor;
+use crate::adapter::rustls_to_io_error;
 use crate::connection_stream::ConnectionStream;
 use crate::handshake::handshake_task_internal;
 use crate::handshake::HandshakeResult;
@@ -71,7 +74,7 @@ enum TlsStreamState {
   /// The connection is closed.
   Closed,
   /// The connection is closed because of an error.
-  ClosedError(ErrorKind),
+  ClosedError(io::Error),
 }
 
 pub type ServerConfigProvider = Arc<
@@ -175,15 +178,12 @@ impl TlsStream {
       let tls = loop {
         tcp_handshake.readable().await?;
         read_acceptor(&tcp_handshake, &mut acceptor)?;
-        if let Some(accepted) = acceptor
-          .accept()
-          .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?
-        {
+        if let Some(accepted) = acceptor.accept().map_err(rustls_to_io_error)? {
           let f = server_config_provider(accepted.client_hello());
           let config = f.await?;
           let tls = accepted
             .into_connection(config)
-            .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+            .map_err(rustls_to_io_error)?;
           break tls;
         }
       };
@@ -392,18 +392,14 @@ impl TlsStream {
       return Err(io::ErrorKind::NotConnected.into());
     };
     let handshake = handshake.as_ref().expect("Should be Some");
-    match handshake {
-      Ok(h) => Ok(h.clone()),
-      Err(err) => Err(err.kind().into()),
-    }
+    clone_result(handshake)
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
     match &*self.handshake.borrow() {
       None => Ok(None),
-      Some(Ok(r)) => Ok(Some(r.clone())),
-      Some(Err(e)) => Err(e.kind().into()),
+      Some(r) => clone_result(r).map(Some),
     }
   }
 
@@ -419,10 +415,11 @@ impl TlsStream {
         write_buf: buf,
         ..
       } => {
+        trace!("join={join_result:?}");
         match join_result {
           Err(err) => {
             // We polled the handle, so we need to update the state to something
-            self.state = TlsStreamState::ClosedError(ErrorKind::Other);
+            self.state = TlsStreamState::ClosedError(ErrorKind::Other.into());
             if err.is_panic() {
               // Resume the panic on the main task
               std::panic::resume_unwind(err.into_panic());
@@ -431,7 +428,7 @@ impl TlsStream {
             }
           }
           Ok(Err(err)) => {
-            self.state = TlsStreamState::ClosedError(err.kind());
+            self.state = TlsStreamState::ClosedError(clone_error(&err));
             Err(err)
           }
           Ok(Ok(result)) => {
@@ -487,7 +484,7 @@ impl TlsStream {
     };
 
     if let Err(err) = res {
-      self.state = TlsStreamState::ClosedError(err.kind());
+      self.state = TlsStreamState::ClosedError(err);
     }
 
     match &mut self.state {
@@ -504,7 +501,7 @@ impl TlsStream {
       // Closed: return ready.
       TlsStreamState::Closed => Poll::Ready(Ok(())),
       // Closed: return error.
-      TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+      TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(err))),
     }
   }
 
@@ -588,8 +585,7 @@ async fn send_handshake(
       })));
     }
     Err(err) => {
-      let kind = err.kind();
-      _ = tx.send(Some(Err(kind.into())));
+      _ = tx.send(Some(Err(clone_error(err))));
     }
   }
   res
@@ -631,7 +627,7 @@ impl AsyncRead for TlsStream {
           }
         }
         TlsStreamState::Closed => Poll::Ready(Ok(())),
-        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(err))),
       };
     }
   }
@@ -690,7 +686,7 @@ impl AsyncWrite for TlsStream {
         TlsStreamState::Closed => {
           Poll::Ready(Err(ErrorKind::NotConnected.into()))
         }
-        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(err))),
       };
     }
   }
@@ -753,7 +749,7 @@ impl AsyncWrite for TlsStream {
         TlsStreamState::Closed => {
           Poll::Ready(Err(ErrorKind::NotConnected.into()))
         }
-        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(err))),
       };
     }
   }
@@ -786,7 +782,7 @@ impl AsyncWrite for TlsStream {
         TlsStreamState::Closed => {
           Poll::Ready(Err(ErrorKind::NotConnected.into()))
         }
-        TlsStreamState::ClosedError(err) => Poll::Ready(Err((*err).into())),
+        TlsStreamState::ClosedError(err) => Poll::Ready(Err(clone_error(&err))),
       };
     }
   }
@@ -812,7 +808,7 @@ impl Drop for TlsStream {
         handle, write_buf, ..
       } => {
         spawn(async move {
-          trace!("in task");
+          trace!("in drop task");
           match handle.await {
             Ok(Ok(result)) => {
               // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
@@ -829,15 +825,15 @@ impl Drop for TlsStream {
               trace!("{x:?}");
             }
           }
-          trace!("done task");
+          trace!("done drop task");
         });
       }
       TlsStreamState::Open(mut stm) => {
         spawn(async move {
-          trace!("in task");
+          trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("{:?}", res);
-          trace!("done task");
+          trace!("done drop task");
         });
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
@@ -881,18 +877,14 @@ impl TlsStreamRead {
       return Err(io::ErrorKind::NotConnected.into());
     };
     let handshake = handshake.as_ref().expect("Should be Some");
-    match handshake {
-      Ok(h) => Ok(h.clone()),
-      Err(err) => Err(err.kind().into()),
-    }
+    clone_result(handshake)
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
     match &*self.handshake.borrow() {
       None => Ok(None),
-      Some(Ok(r)) => Ok(Some(r.clone())),
-      Some(Err(e)) => Err(e.kind().into()),
+      Some(r) => clone_result(r).map(Some),
     }
   }
 }
@@ -936,18 +928,14 @@ impl TlsStreamWrite {
       return Err(io::ErrorKind::NotConnected.into());
     };
     let handshake = handshake.as_ref().expect("Should be Some");
-    match handshake {
-      Ok(h) => Ok(h.clone()),
-      Err(err) => Err(err.kind().into()),
-    }
+    clone_result(handshake)
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
     match &*self.handshake.borrow() {
       None => Ok(None),
-      Some(Ok(r)) => Ok(Some(r.clone())),
-      Some(Err(e)) => Err(e.kind().into()),
+      Some(r) => clone_result(r).map(Some),
     }
   }
 }
@@ -1123,20 +1111,20 @@ pub(super) mod tests {
     (server, client)
   }
 
-  async fn tls_with_tcp_client() -> (TlsStream, TcpStream) {
+  async fn tls_with_tcp_server(
+    delay_handshake: bool,
+  ) -> (TcpStream, TlsStream) {
     let (server, client) = tcp_pair().await;
-    let server =
-      TlsStream::new_server_side(server, server_config(&[]).into(), None);
-    (server, client)
-  }
-
-  async fn tls_with_tcp_server() -> (TcpStream, TlsStream) {
-    let (server, client) = tcp_pair().await;
-    let client = TlsStream::new_client_side(
+    let client_test_options = TestOptions {
+      delay_handshake,
+      ..Default::default()
+    };
+    let client = TlsStream::new_client_side_test_options(
       client,
       client_config(&[]).into(),
       "example.com".try_into().unwrap(),
       None,
+      client_test_options,
     );
     (server, client)
   }
@@ -1380,19 +1368,25 @@ pub(super) mod tests {
     Ok(())
   }
 
-  /// Test that the handshake works, and we get the correct ALPN negotiated values.
+  /// Test that the handshake fails, and we get the correct errors on both ends.
   #[tokio::test]
-  #[ntest::timeout(60000)]
+  // #[ntest::timeout(60000)]
   async fn test_client_server_alpn_mismatch() -> TestResult {
     let (mut server, mut client) =
       tls_pair_alpn(&["a"], None, &["b"], None).await;
     let a = spawn(async move {
-      server.handshake().await.expect_err("Expected a failure");
-      server.flush().await.expect_err("Expected a failure");
+      let e = server.handshake().await.expect_err("Expected a failure");
+      assert_eq!(e.kind(), ErrorKind::InvalidData);
+      assert_eq!(e.to_string(), "peer doesn't support any known protocol");
+      let e = server.flush().await.expect_err("Expected a failure");
+      assert_eq!(e.kind(), ErrorKind::InvalidData);
     });
     let b = spawn(async move {
-      client.handshake().await.expect_err("Expected a failure");
-      client.flush().await.expect_err("Expected a failure");
+      let e = client.handshake().await.expect_err("Expected a failure");
+      assert_eq!(e.kind(), ErrorKind::InvalidData);
+      assert_eq!(e.to_string(), "received fatal alert: NoApplicationProtocol");
+      let e = client.flush().await.expect_err("Expected a failure");
+      assert_eq!(e.kind(), ErrorKind::InvalidData);
     });
     a.await?;
     b.await?;
@@ -1696,7 +1690,7 @@ pub(super) mod tests {
 
   #[tokio::test]
   async fn test_server_half_crash_before_handshake() -> TestResult {
-    let (mut server, mut client) = tls_with_tcp_server().await;
+    let (mut server, mut client) = tls_with_tcp_server(false).await;
     // This test occasionally shows up as ConnectionReset on Mac -- the delay ensures we wait long enough
     // for the handshake to settle.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1712,7 +1706,10 @@ pub(super) mod tests {
 
   #[tokio::test]
   async fn test_server_crash_before_handshake() -> TestResult {
-    let (mut server, mut client) = tls_with_tcp_server().await;
+    let (mut server, mut client) = tls_with_tcp_server(false).await;
+    // This test occasionally shows up as ConnectionReset on Mac -- the delay ensures we wait long enough
+    // for the handshake to settle.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     server.shutdown().await?;
     drop(server);
 

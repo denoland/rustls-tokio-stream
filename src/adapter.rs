@@ -8,6 +8,31 @@ use std::io::Read;
 use std::io::Write;
 use tokio::net::TcpStream;
 
+/// Convert a [`rustls::Error`] to an [`io::Error`]
+pub fn rustls_to_io_error(error: rustls::Error) -> io::Error {
+  io::Error::new(ErrorKind::InvalidData, error)
+}
+
+/// Clones an [`io::Result`], assuming the inner error, if any, is a [`rustls::Error`].
+pub fn clone_result<T: Clone>(result: &io::Result<T>) -> io::Result<T> {
+  match result {
+    Ok(t) => Ok(t.clone()),
+    Err(e) => Err(clone_error(e)),
+  }
+}
+
+/// Clones an [`io::Error`], assuming the inner error, if any, is a [`rustls::Error`].
+pub fn clone_error(e: &io::Error) -> io::Error {
+  let kind = e.kind();
+  match e.get_ref() {
+    Some(e) => match e.downcast_ref::<rustls::Error>() {
+      Some(e) => io::Error::new(kind, e.clone()),
+      None => kind.into(),
+    },
+    None => kind.into(),
+  }
+}
+
 #[inline(always)]
 fn trace_error(error: io::Error) -> io::Error {
   #[cfg(all(debug_assertions, feature = "trace"))]

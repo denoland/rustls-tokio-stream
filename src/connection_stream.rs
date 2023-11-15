@@ -17,6 +17,7 @@ use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
 use crate::adapter::read_tls;
+use crate::adapter::rustls_to_io_error;
 use crate::adapter::write_tls;
 use crate::trace;
 
@@ -115,15 +116,6 @@ impl ConnectionStream {
       .last_iostate
       .as_ref()
       .map(|iostate| iostate.plaintext_bytes_to_read())
-      .unwrap_or_default()
-  }
-
-  #[cfg(test)]
-  pub fn tls_bytes_to_write(&self) -> usize {
-    self
-      .last_iostate
-      .as_ref()
-      .map(|iostate| iostate.tls_bytes_to_write())
       .unwrap_or_default()
   }
 
@@ -231,9 +223,8 @@ impl ConnectionStream {
       Err(err) if err.kind() == ErrorKind::WouldBlock => {
         trace!("r*={err:?}");
         // No data to read, but we need to make sure we don't have an error state here.
-        if self.rd_proto_error.is_some() {
-          // TODO: Should we expose the underlying TLS error?
-          Err(ErrorKind::InvalidData.into())
+        if let Some(err) = &self.rd_proto_error {
+          Err(rustls_to_io_error(err.clone()))
         } else if let Some(err) = self.rd_error {
           // We have a connection error
           Err(err.into())
@@ -764,17 +755,17 @@ mod tests {
     expect_write_1(&mut server).await;
     assert_ne!(server.plaintext_bytes_to_read(), 0);
 
-    client
-      .into_inner()
-      .0
-      .write_all(b"THIS IS NOT A VALID TLS PACKET")
-      .await?;
+    let mut tcp = client.into_inner().0;
+    tcp.write_all(b"THIS IS NOT A VALID TLS PACKET").await?;
 
     // One byte will read fine
     expect_read_1(&mut server).await;
 
     // The next byte will not
     expect_read_1_err(&mut server, ErrorKind::InvalidData).await;
+
+    // Hold the TCP connection until here otherwise Windows may barf
+    drop(tcp);
 
     Ok(())
   }
