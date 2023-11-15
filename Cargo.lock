@@ -577,6 +577,7 @@ dependencies = [
  "rstest",
  "rustls",
  "rustls-pemfile",
+ "socket2",
  "tokio",
 ]
 

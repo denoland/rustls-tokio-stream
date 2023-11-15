@@ -1,6 +1,7 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use rustls::Connection;
 use rustls::IoState;
+use socket2::SockRef;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
@@ -464,18 +465,10 @@ impl ConnectionStream {
     ready!(self.poll_flush(cx)?);
     debug_assert!(!self.tls.wants_write());
 
-    // Note that this is not technically an async call
-    // TODO(mmastrac): This is currently untested
-    let tcp_ref: &TcpStream = &self.tcp;
-    // TODO(mmastrac): This should probably be done by going deeper into mio instead of this hackery
-    // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    let mut tcp_ptr = unsafe {
-      NonNull::new(tcp_ref as *const _ as *mut TcpStream).unwrap_unchecked()
-    };
+    _ = SockRef::from(&self.tcp).shutdown(std::net::Shutdown::Write);
 
     trace!("poll_shutdown complete");
-    // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
+
     Poll::Ready(Ok(()))
   }
 }
