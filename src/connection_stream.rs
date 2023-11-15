@@ -327,7 +327,7 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
-    self.poll_perform_write(cx, |tls| {
+    self.poll_perform_write(cx, false, |tls| {
       let n = tls.writer().write(buf).expect("Write will never fail");
       trace!("w={n}");
       assert!(n > 0);
@@ -346,7 +346,7 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
-    self.poll_perform_write(cx, |tls| {
+    self.poll_perform_write(cx, false, |tls| {
       // TODO(mmastrac): we should manually write individual bufs here as rustls is not optimal if internal buffers are full
       let n = tls
         .writer()
@@ -360,13 +360,14 @@ impl ConnectionStream {
 
   /// Perform the common write steps required to prepare the connection and TLS state for a write (vectored or not) to happen.
   #[inline(always)]
-  fn poll_perform_write(
+  fn poll_perform_write<T>(
     &mut self,
     cx: &mut Context<'_>,
-    f: impl Fn(&mut Connection) -> usize,
-  ) -> Poll<io::Result<usize>> {
+    flushing: bool,
+    f: impl Fn(&mut Connection) -> T,
+  ) -> Poll<io::Result<T>> {
     // Writes after shutdown return NotConnected
-    if self.wants_close_sent {
+    if !flushing && self.wants_close_sent {
       self.wr_waker.take();
       return Poll::Ready(Err(ErrorKind::NotConnected.into()));
     }
@@ -428,18 +429,9 @@ impl ConnectionStream {
   /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on
   /// reads at all.
   pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    loop {
-      match self.poll_write_only(PollContext::Explicit(cx)) {
-        StreamProgress::RegisteredWaker => break Poll::Pending,
-        StreamProgress::MadeProgress => continue,
-        StreamProgress::NoInterest => break Poll::Ready(Ok(())),
-        StreamProgress::Error => {
-          let err = self.wr_error.unwrap();
-          trace!("flush={}", err);
-          break Poll::Ready(Err(err.into()));
-        }
-      }
-    }
+    self.poll_perform_write(cx, true, |_| {
+      // Do nothing
+    })
   }
 
   /// Polls for completion of all the writes in the rustls [`Connection`]. Does not progress on

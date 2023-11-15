@@ -379,13 +379,6 @@ impl TlsStream {
     }
   }
 
-  // /// Tokio-rustls compatibility: returns a reference to the underlying TCP
-  // /// stream, and a reference to the Rustls `Connection` object.
-  // pub fn get_ref(&self) -> (&TcpStream, &Connection) {
-  //   let inner = self.0.as_ref().unwrap();
-  //   (&inner.tcp, &inner.tls)
-  // }
-
   pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
     let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
@@ -1822,11 +1815,10 @@ pub(super) mod tests {
   async fn large_transfer_with_buffer_limit_split(
     #[case] swap: bool,
   ) -> TestResult {
-    const BUF_SIZE: usize = 10 * 1024;
-    const BUF_COUNT: usize = 1024;
+    const BUF_SIZE: usize = 1024 * 1024;
+    const BUF_COUNT: usize = 10;
 
-    let (server, client) = tls_pair_buffer_size(BUF_SIZE.try_into().ok()).await;
-
+    let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
     let (server, client) = if swap {
       (client, server)
     } else {
@@ -1839,7 +1831,7 @@ pub(super) mod tests {
       let barrier2 = barrier.clone();
       let a = spawn(async move {
         tokio::select! {
-          _ = r.read_u8() => {},
+          x = r.read_u8() => { _ = x.expect_err("should have failed") },
           _ = barrier.wait() => {}
         };
         r
@@ -1857,12 +1849,12 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      _ = r.unsplit(w).close().await;
+      r.unsplit(w).close().await.unwrap();
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
-      for _ in 0..BUF_COUNT {
-        let mut buf = [0; BUF_SIZE];
+      let mut buf = vec![0; BUF_SIZE];
+      for _i in 0..BUF_COUNT {
         assert_eq!(BUF_SIZE, r.read_exact(&mut buf).await.unwrap());
       }
       expect_eof_read(&mut r).await;
