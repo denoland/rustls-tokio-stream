@@ -1814,6 +1814,53 @@ pub(super) mod tests {
   #[rstest]
   #[case(true)]
   #[case(false)]
+  #[tokio::test]
+  async fn large_transfer_with_buffer_limit_split(#[case] swap: bool) -> TestResult {
+    const BUF_SIZE: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1024;
+
+    let (server, client) = tls_pair_buffer_size(
+      BUF_SIZE.try_into().ok(),
+    )
+    .await;
+
+    let (server, mut client) = if swap {
+      (client, server)
+    } else {
+      (server, client)
+    };
+
+    let a = spawn(async move {
+      let (mut r, mut w) = server.into_split();
+      let a = spawn(async move {
+        r.read_u8().await.expect_err("");
+      });
+      let b = spawn(async move {
+        // Heap allocate a large buffer and send it
+        let buf = vec![42; BUF_COUNT * BUF_SIZE];
+        w.write_all(&buf).await.unwrap();
+        w.shutdown().await.unwrap();
+      });
+
+      a.await.unwrap();
+      b.await.unwrap();
+    });
+    let b = spawn(async move {
+      for _ in 0..BUF_COUNT {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut buf = [0; BUF_SIZE];
+        assert_eq!(BUF_SIZE, client.read_exact(&mut buf).await.unwrap());
+      }
+      expect_eof_read(&mut client).await;
+    });
+    a.await?;
+    b.await?;
+    Ok(())
+  }
+
+  #[rstest]
+  #[case(true)]
+  #[case(false)]
   #[tokio::test(flavor = "current_thread")]
   async fn large_transfer_with_shutdown(#[case] swap: bool) -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
