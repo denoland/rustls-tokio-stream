@@ -822,7 +822,7 @@ impl Drop for TlsStream {
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-              trace!("{:?}", res);
+              trace!("shutdown handshake {:?}", res);
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -838,7 +838,7 @@ impl Drop for TlsStream {
         spawn(async move {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-          trace!("{:?}", res);
+          trace!("shutdown open {:?}", res);
           trace!("done drop task");
         });
       }
@@ -1869,6 +1869,7 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
+      tokio::time::sleep(Duration::from_secs(60)).await;
       drop(r.unsplit(w));
     });
     let b = spawn(async move {
