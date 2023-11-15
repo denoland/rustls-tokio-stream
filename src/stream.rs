@@ -358,6 +358,16 @@ impl TlsStream {
     }
   }
 
+  pub fn linger(&self) -> Result<Option<Duration>, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().linger(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.linger(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
   pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
     match &self.state {
       TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
@@ -1838,7 +1848,9 @@ pub(super) mod tests {
     };
 
     let a = spawn(async move {
+      eprintln!("linger = {:?}", server.linger());
       server.set_linger(Some(Duration::from_secs(60))).unwrap();
+      eprintln!("linger = {:?}", server.linger());
       let (mut r, mut w) = server.into_split();
       let barrier = Arc::new(Barrier::new(2));
       let barrier2 = barrier.clone();
@@ -1858,7 +1870,7 @@ pub(super) mod tests {
         w.handshake().await.unwrap();
         while !buf.is_empty() {
           let n = w.write(&buf).await.unwrap();
-          // w.flush().await.unwrap();
+          w.flush().await.unwrap();
           buf = &mut buf[n..];
           trace!("[TEST] wrote {n}");
         }
@@ -1869,7 +1881,6 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      tokio::time::sleep(Duration::from_secs(60)).await;
       drop(r.unsplit(w));
     });
     let b = spawn(async move {
