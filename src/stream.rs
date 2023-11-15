@@ -781,7 +781,9 @@ impl AsyncWrite for TlsStream {
   }
 
   fn is_write_vectored(&self) -> bool {
-    true
+    // While rustls supports vectored writes, they act more like buffered writes so
+    // we should prefer upstream producers to pre-aggregate when possible.
+    false
   }
 
   fn poll_shutdown(
@@ -994,7 +996,6 @@ pub(super) mod tests {
   use tokio::net::TcpSocket;
   use tokio::spawn;
   use tokio::sync::Barrier;
-  use tokio::time::timeout;
 
   type TestResult = Result<(), std::io::Error>;
 
@@ -1815,8 +1816,8 @@ pub(super) mod tests {
   async fn large_transfer_with_buffer_limit_split(
     #[case] swap: bool,
   ) -> TestResult {
-    const BUF_SIZE: usize = 1024 * 1024;
-    const BUF_COUNT: usize = 10;
+    const BUF_SIZE: usize = 1024;
+    const BUF_COUNT: usize = 10 * 1024;
 
     let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
     let (server, client) = if swap {
@@ -1840,10 +1841,14 @@ pub(super) mod tests {
       });
       let b = spawn(async move {
         // Heap allocate a large buffer and send it
-        let buf = vec![42; BUF_COUNT * BUF_SIZE];
+        let mut buf = vec![42; BUF_COUNT * BUF_SIZE];
+        let mut buf: &mut [u8] = &mut buf;
         w.handshake().await.unwrap();
-        w.write_all(&buf).await.unwrap();
-        w.flush().await.unwrap();
+        while !buf.is_empty() {
+          let n = w.write(&buf).await.unwrap();
+          w.flush().await.unwrap();
+          buf = &mut buf[n..];
+        }
         w.shutdown().await.unwrap();
         barrier2.wait().await;
         w
@@ -1959,7 +1964,9 @@ pub(super) mod tests {
       tls_pair_buffer_size(Some(NonZeroUsize::try_from(1024).unwrap())).await;
     if handshake_first {
       server.handshake().await.unwrap();
+      server.flush().await.unwrap();
       client.handshake().await.unwrap();
+      client.flush().await.unwrap();
     }
     let n = client
       .write_vectored(&[
@@ -1972,6 +1979,8 @@ pub(super) mod tests {
     let mut buf = [0; 2048];
     // Note that we need to flush to make progress on writes!
     client.flush().await.expect("failed to flush");
+    // We need the TCP stack to send all the writes -- in release mode this is sometimes too fast
+    tokio::time::sleep(Duration::from_millis(1)).await;
     let n = server.read(&mut buf).await.expect("failed to read");
     assert_eq!(n, expected);
     Ok(())
