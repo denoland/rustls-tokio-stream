@@ -1843,9 +1843,9 @@ pub(super) mod tests {
       let b = spawn(async move {
         // Heap allocate a large buffer and send it
         let buf = vec![42; BUF_COUNT * BUF_SIZE];
+        w.handshake().await.unwrap();
         w.write_all(&buf).await.unwrap();
         w.flush().await.unwrap();
-        w.handshake().await.unwrap();
         w.shutdown().await.unwrap();
       });
 
