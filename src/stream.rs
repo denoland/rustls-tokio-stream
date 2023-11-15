@@ -1838,7 +1838,7 @@ pub(super) mod tests {
     };
 
     let a = spawn(async move {
-      server.set_linger(Some(Duration::from_secs(30))).unwrap();
+      server.set_linger(Some(Duration::from_secs(60))).unwrap();
       let (mut r, mut w) = server.into_split();
       let barrier = Arc::new(Barrier::new(2));
       let barrier2 = barrier.clone();
