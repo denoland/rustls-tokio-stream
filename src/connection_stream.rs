@@ -475,7 +475,8 @@ impl ConnectionStream {
 
     trace!("poll_shutdown complete");
     // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
+    let res = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
+    trace!("shutdown = {res:?}");
     Poll::Ready(Ok(()))
   }
 }
