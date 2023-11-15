@@ -327,6 +327,12 @@ impl ConnectionStream {
       return Poll::Ready(Ok(0));
     }
 
+    // Writes after shutdown return NotConnected
+    if self.wants_close_sent {
+      self.wr_waker.take();
+      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
+    }
+
     self.poll_perform_write(cx, false, |tls| {
       let n = tls.writer().write(buf).expect("Write will never fail");
       trace!("w={n}");
@@ -344,6 +350,12 @@ impl ConnectionStream {
     if bufs.is_empty() {
       self.wr_waker.take();
       return Poll::Ready(Ok(0));
+    }
+
+    // Writes after shutdown return NotConnected
+    if self.wants_close_sent {
+      self.wr_waker.take();
+      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
     }
 
     self.poll_perform_write(cx, false, |tls| {
@@ -366,12 +378,6 @@ impl ConnectionStream {
     flushing: bool,
     f: impl Fn(&mut Connection) -> T,
   ) -> Poll<io::Result<T>> {
-    // Writes after shutdown return NotConnected
-    if !flushing && self.wants_close_sent {
-      self.wr_waker.take();
-      return Poll::Ready(Err(ErrorKind::NotConnected.into()));
-    }
-
     // First prepare to write
     let res = loop {
       let write = self.poll_write_only(PollContext::Explicit(cx));
@@ -469,7 +475,8 @@ impl ConnectionStream {
 
     trace!("poll_shutdown complete");
     // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx)
+    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
+    Poll::Ready(Ok(()))
   }
 }
 

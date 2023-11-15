@@ -499,8 +499,8 @@ impl TlsStream {
   }
 
   pub async fn close(mut self) -> io::Result<()> {
-    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     trace!("closing {self:?}");
+    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
         handle,
