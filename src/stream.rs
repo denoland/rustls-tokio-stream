@@ -1835,10 +1835,14 @@ pub(super) mod tests {
 
     let a = spawn(async move {
       let (mut r, mut w) = server.into_split();
+      let barrier = Arc::new(Barrier::new(2));
+      let barrier2 = barrier.clone();
       let a = spawn(async move {
-        timeout(Duration::from_millis(1), r.read_u8())
-          .await
-          .expect_err("");
+        tokio::select! {
+          _ = r.read_u8() => {},
+          _ = barrier.wait() => {}
+        };
+        r
       });
       let b = spawn(async move {
         // Heap allocate a large buffer and send it
@@ -1847,10 +1851,13 @@ pub(super) mod tests {
         w.write_all(&buf).await.unwrap();
         w.flush().await.unwrap();
         w.shutdown().await.unwrap();
+        barrier2.wait().await;
+        w
       });
 
-      a.await.unwrap();
-      b.await.unwrap();
+      let r = a.await.unwrap();
+      let w = b.await.unwrap();
+      _ = r.unsplit(w).close().await;
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
