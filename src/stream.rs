@@ -358,6 +358,16 @@ impl TlsStream {
     }
   }
 
+  pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.set_linger(dur),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     match &self.state {
@@ -828,7 +838,6 @@ impl Drop for TlsStream {
         spawn(async move {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-          _ = stm.tcp_stream().set_linger(Some(Duration::from_secs(10)));
           trace!("{:?}", res);
           trace!("done drop task");
         });
@@ -1829,6 +1838,7 @@ pub(super) mod tests {
     };
 
     let a = spawn(async move {
+      server.set_linger(Some(Duration::from_secs(30))).unwrap();
       let (mut r, mut w) = server.into_split();
       let barrier = Arc::new(Barrier::new(2));
       let barrier2 = barrier.clone();
@@ -1896,6 +1906,7 @@ pub(super) mod tests {
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
+      server.set_linger(Some(Duration::from_secs(30))).unwrap();
       server.write_all(&buf).await.unwrap();
       server.shutdown().await.unwrap();
       server.close().await.unwrap();
