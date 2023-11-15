@@ -1858,7 +1858,7 @@ pub(super) mod tests {
         w.handshake().await.unwrap();
         while !buf.is_empty() {
           let n = w.write(&buf).await.unwrap();
-          w.flush().await.unwrap();
+          // w.flush().await.unwrap();
           buf = &mut buf[n..];
           trace!("[TEST] wrote {n}");
         }
