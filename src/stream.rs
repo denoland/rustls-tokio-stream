@@ -541,6 +541,8 @@ impl TlsStream {
             let mut stm = ConnectionStream::new(tcp, tls);
             poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
             poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+            let (tcp, _) = stm.into_inner();
+            nonblocking_tcp_drop(tcp);
           }
           Err(err) => {
             if err.is_panic() {
@@ -557,6 +559,8 @@ impl TlsStream {
       }
       TlsStreamState::Open(mut stm) => {
         poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+        let (tcp, _) = stm.into_inner();
+        nonblocking_tcp_drop(tcp);
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         // Nothing
@@ -605,6 +609,20 @@ async fn send_handshake(
     }
   }
   res
+}
+
+fn nonblocking_tcp_drop(tcp: TcpStream) {
+  if let Ok(tcp) = tcp.into_std() {
+    spawn_blocking(move || {
+      // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
+      trace!("in drop tcp task");
+      // Drop the TCP stream here just in case close() blocks
+      _ = tcp.set_nonblocking(false);
+      sleep(Duration::from_secs(1));
+      drop(tcp);
+      trace!("done drop tcp task");
+    });
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -840,17 +858,7 @@ impl Drop for TlsStream {
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
               trace!("shutdown handshake {:?}", res);
               let (tcp, _) = stm.into_inner();
-              if let Ok(tcp) = tcp.into_std() {
-                spawn_blocking(move || {
-                  // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
-                  trace!("in drop tcp task");
-                  // Drop the TCP stream here just in case close() blocks
-                  _ = tcp.set_nonblocking(false);
-                  sleep(Duration::from_secs(1));
-                  drop(tcp);
-                  trace!("done drop tcp task");
-                });
-              }
+              nonblocking_tcp_drop(tcp);
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -868,16 +876,7 @@ impl Drop for TlsStream {
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("shutdown open {:?}", res);
           let (tcp, _) = stm.into_inner();
-          if let Ok(tcp) = tcp.into_std() {
-            spawn_blocking(move || {
-              trace!("in drop tcp task");
-              // Drop the TCP stream here just in case close() blocks
-              _ = tcp.set_nonblocking(false);
-              sleep(Duration::from_secs(1));
-              drop(tcp);
-              trace!("done drop tcp task");
-            });
-          }
+          nonblocking_tcp_drop(tcp);
           trace!("done drop task");
         });
       }
