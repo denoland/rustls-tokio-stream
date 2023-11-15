@@ -7,40 +7,40 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 
 use crate::adapter::read_tls;
+use crate::adapter::rustls_to_io_error;
 use crate::adapter::write_tls;
+use crate::trace;
 use crate::TestOptions;
 
-fn try_read<'a, 'b>(
-  tcp: &'a TcpStream,
-  tls: &'b mut Connection,
-) -> io::Result<()> {
+#[inline(always)]
+fn trace_result<T>(result: io::Result<T>) -> io::Result<T> {
+  #[cfg(feature = "trace")]
+  if let Err(err) = &result {
+    trace!("result = {err:?}");
+  }
+  result
+}
+
+fn try_read(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
   match read_tls(tcp, tls) {
     Ok(0) => {
       // EOF during handshake
       return Err(ErrorKind::UnexpectedEof.into());
     }
     Ok(_) => {
-      tls
-        .process_new_packets()
-        .map_err(|_| io::Error::from(ErrorKind::InvalidData))?;
+      tls.process_new_packets().map_err(rustls_to_io_error)?;
     }
     Err(err) if err.kind() == ErrorKind::WouldBlock => {
       // Spurious wakeup
     }
     err @ Err(_) => {
-      // If we failed to read, try a last-gasp write to send a reason to the other side. This behaves in the
-      // same way that the rustls Connection::complete_io() method would.
-      _ = try_write(tcp, tls);
       err?;
     }
   }
   Ok(())
 }
 
-fn try_write<'a, 'b>(
-  tcp: &'a TcpStream,
-  tls: &'b mut Connection,
-) -> io::Result<()> {
+fn try_write(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
   match write_tls(tcp, tls) {
     Ok(_) => {}
     Err(err) if err.kind() == ErrorKind::WouldBlock => {
@@ -81,15 +81,27 @@ impl HandshakeResult {
 }
 
 /// Performs a handshake and returns the [`TcpStream`]/[`Connection`] pair if successful.
-#[cfg(test)]
 pub(crate) async fn handshake_task(
   tcp: Arc<TcpStream>,
   tls: Connection,
+  test_options: TestOptions,
 ) -> io::Result<HandshakeResult> {
-  handshake_task_internal(tcp, tls, TestOptions::default()).await
+  let res = handshake_task_internal(tcp, tls, test_options).await;
+  // Ensure consistency in handshake errors
+  match res {
+    #[cfg(windows)]
+    Err(err) if err.kind() == ErrorKind::ConnectionAborted => {
+      Err(ErrorKind::UnexpectedEof.into())
+    }
+    #[cfg(target_os = "macos")]
+    Err(err) if err.kind() == ErrorKind::ConnectionReset => {
+      Err(ErrorKind::UnexpectedEof.into())
+    }
+    r => r,
+  }
 }
 
-pub(crate) async fn handshake_task_internal(
+async fn handshake_task_internal(
   tcp: Arc<TcpStream>,
   mut tls: Connection,
   test_options: TestOptions,
@@ -107,7 +119,7 @@ pub(crate) async fn handshake_task_internal(
       break;
     }
     if tls.wants_write() {
-      tcp.writable().await?;
+      trace_result(tcp.writable().await)?;
       #[cfg(test)]
       if test_options.slow_handshake_write {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -153,12 +165,31 @@ pub(crate) async fn handshake_task_internal(
     // this loop while we flush writes. Note that these signals changed subtly between rustls 0.20 and
     // rustls 0.21 (in the former we didn't need the `tls.wants_read()` test).
     if tls.is_handshaking() && tls.wants_read() {
-      tcp.readable().await?;
+      trace_result(tcp.readable().await)?;
       #[cfg(test)]
       if test_options.slow_handshake_read {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      try_read(&tcp, &mut tls)?;
+      match try_read(&tcp, &mut tls) {
+        Ok(_) => {}
+        Err(err) => {
+          trace!("read error {err:?}, starting last gasp write");
+          // If we failed to read, try a last-gasp write to send a reason to the other side. This behaves in the
+          // same way that the rustls Connection::complete_io() method would.
+          while tls.wants_write() {
+            trace_result(tcp.writable().await)?;
+            match try_write(&tcp, &mut tls) {
+              Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                // Spurious wakeup
+                continue;
+              }
+              Err(_) => break,
+              Ok(_) => {}
+            }
+          }
+          return Err(err);
+        }
+      }
     }
   }
   Ok(HandshakeResult(tcp, tls))
@@ -185,8 +216,16 @@ mod tests {
       ClientConnection::new(client_config().into(), server_name())
         .unwrap()
         .into();
-    let server = spawn(handshake_task(server.into(), tls_server));
-    let client = spawn(handshake_task(client.into(), tls_client));
+    let server = spawn(handshake_task(
+      server.into(),
+      tls_server,
+      TestOptions::default(),
+    ));
+    let client = spawn(handshake_task(
+      client.into(),
+      tls_client,
+      TestOptions::default(),
+    ));
     let (tcp_client, tls_client) = client.await.unwrap().unwrap().reclaim();
     let (tcp_server, tls_server) = server.await.unwrap().unwrap().reclaim();
     assert!(!tls_client.is_handshaking());
