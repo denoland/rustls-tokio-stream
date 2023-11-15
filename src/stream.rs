@@ -24,7 +24,6 @@ use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
-use tokio::task::spawn_blocking;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
@@ -43,6 +42,7 @@ use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
 use tokio::sync::watch;
+use tokio::task::spawn_blocking;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
@@ -858,6 +858,12 @@ impl Drop for TlsStream {
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("shutdown open {:?}", res);
           trace!("done drop task");
+          spawn_blocking(move || {
+            // Drop the TCP stream here just in case close() blocks
+            let now = Instant::now();
+            drop(stm);
+            eprintln!("drop finished after {:?}", now.elapsed());
+          });
         });
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
