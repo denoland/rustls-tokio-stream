@@ -492,14 +492,16 @@ impl tokio::io::AsyncWrite for ConnectionStream {
   }
 
   fn is_write_vectored(&self) -> bool {
-    true
+    // While rustls supports vectored writes, they act more like buffered writes so
+    // we should prefer upstream producers to pre-aggregate when possible.
+    false
   }
 
   fn poll_flush(
     self: Pin<&mut Self>,
-    _cx: &mut Context<'_>,
+    cx: &mut Context<'_>,
   ) -> Poll<Result<(), io::Error>> {
-    unimplemented!()
+    ConnectionStream::poll_flush(self.get_mut(), cx)
   }
 
   fn poll_shutdown(
