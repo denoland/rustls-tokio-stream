@@ -394,8 +394,8 @@ impl ConnectionStream {
               StreamProgress::MadeProgress => continue,
               StreamProgress::RegisteredWaker if flushing => Poll::Pending,
               _ => Poll::Ready(Ok(n)),
-            }
-          }
+            };
+          };
         }
       };
     };
@@ -445,6 +445,7 @@ impl ConnectionStream {
     // Immediate state change so we can error writes
     self.wants_close_sent = true;
     if !self.close_sent {
+      trace!("sending CloseNotify");
       self.tls.send_close_notify();
       self.close_sent = true;
     }
@@ -461,8 +462,7 @@ impl ConnectionStream {
       NonNull::new(tcp_ref as *const _ as *mut TcpStream).unwrap_unchecked()
     };
     // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
-    Poll::Ready(Ok(()))
+    Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx)
   }
 }
 
