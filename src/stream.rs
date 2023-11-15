@@ -1845,6 +1845,7 @@ pub(super) mod tests {
         let buf = vec![42; BUF_COUNT * BUF_SIZE];
         w.write_all(&buf).await.unwrap();
         w.flush().await.unwrap();
+        w.handshake().await.unwrap();
         w.shutdown().await.unwrap();
       });
 
@@ -1854,7 +1855,6 @@ pub(super) mod tests {
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
       for _ in 0..BUF_COUNT {
-        tokio::time::sleep(Duration::from_millis(1)).await;
         let mut buf = [0; BUF_SIZE];
         assert_eq!(BUF_SIZE, r.read_exact(&mut buf).await.unwrap());
       }
