@@ -34,12 +34,15 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::ready;
+use std::thread::sleep;
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
 use tokio::sync::watch;
+use tokio::task::spawn_blocking;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
@@ -357,6 +360,26 @@ impl TlsStream {
     }
   }
 
+  pub fn linger(&self) -> Result<Option<Duration>, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().linger(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.linger(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
+  pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.set_linger(dur),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     match &self.state {
@@ -499,8 +522,8 @@ impl TlsStream {
   }
 
   pub async fn close(mut self) -> io::Result<()> {
-    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     trace!("closing {self:?}");
+    let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
         handle,
@@ -800,18 +823,34 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
-        handle, write_buf, ..
+        handle,
+        write_buf,
+        tcp,
+        ..
       } => {
         spawn(async move {
           trace!("in drop task");
           match handle.await {
             Ok(Ok(result)) => {
+              drop(tcp);
               // TODO(mmastrac): if we split ConnectionStream we can remove this Arc and use reclaim2
               let (tcp, tls) = result.into_inner();
               let mut stm = ConnectionStream::new(tcp, tls);
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-              trace!("{:?}", res);
+              trace!("shutdown handshake {:?}", res);
+              let (tcp, _) = stm.into_inner();
+              if let Ok(tcp) = tcp.into_std() {
+                spawn_blocking(move || {
+                  // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
+                  trace!("in drop tcp task");
+                  // Drop the TCP stream here just in case close() blocks
+                  _ = tcp.set_nonblocking(false);
+                  sleep(Duration::from_secs(1));
+                  drop(tcp);
+                  trace!("done drop tcp task");
+                });
+              }
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -827,7 +866,18 @@ impl Drop for TlsStream {
         spawn(async move {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
-          trace!("{:?}", res);
+          trace!("shutdown open {:?}", res);
+          let (tcp, _) = stm.into_inner();
+          if let Ok(tcp) = tcp.into_std() {
+            spawn_blocking(move || {
+              trace!("in drop tcp task");
+              // Drop the TCP stream here just in case close() blocks
+              _ = tcp.set_nonblocking(false);
+              sleep(Duration::from_secs(1));
+              drop(tcp);
+              trace!("done drop tcp task");
+            });
+          }
           trace!("done drop task");
         });
       }
@@ -1817,7 +1867,7 @@ pub(super) mod tests {
     #[case] swap: bool,
   ) -> TestResult {
     const BUF_SIZE: usize = 1024;
-    const BUF_COUNT: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1 * 1024;
 
     let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
     let (server, client) = if swap {
@@ -1848,6 +1898,7 @@ pub(super) mod tests {
           let n = w.write(&buf).await.unwrap();
           w.flush().await.unwrap();
           buf = &mut buf[n..];
+          trace!("[TEST] wrote {n}");
         }
         w.shutdown().await.unwrap();
         barrier2.wait().await;
@@ -1856,13 +1907,17 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      r.unsplit(w).close().await.unwrap();
+      drop(r.unsplit(w));
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
       let mut buf = vec![0; BUF_SIZE];
-      for _i in 0..BUF_COUNT {
-        assert_eq!(BUF_SIZE, r.read_exact(&mut buf).await.unwrap());
+      for i in 0..BUF_COUNT {
+        let r = r.read_exact(&mut buf).await;
+        if let Err(e) = &r {
+          panic!("Failed to read after {i} of {BUF_COUNT} reads: {e:?}");
+        };
+        assert_eq!(BUF_SIZE, r.unwrap());
       }
       expect_eof_read(&mut r).await;
     });

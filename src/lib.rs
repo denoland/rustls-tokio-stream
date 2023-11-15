@@ -31,6 +31,7 @@ macro_rules! trace {
   ($($args:expr),+) => {
     if cfg!(feature="trace")
     {
+      print!("[{:?}] ", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
       println!($($args),+);
     }
   };
