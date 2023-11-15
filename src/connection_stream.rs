@@ -12,6 +12,7 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+use std::time::Instant;
 use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
@@ -475,8 +476,9 @@ impl ConnectionStream {
 
     trace!("poll_shutdown complete");
     // SAFETY: We know that poll_shutdown never uses a mutable reference here
+    let now = Instant::now();
     let res = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
-    trace!("shutdown = {res:?}");
+    trace!("shutdown = {res:?} {:?}", now.elapsed());
     Poll::Ready(Ok(()))
   }
 }
