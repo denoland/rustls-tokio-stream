@@ -823,7 +823,10 @@ impl Drop for TlsStream {
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
     match state {
       TlsStreamState::Handshaking {
-        handle, write_buf, tcp, ..
+        handle,
+        write_buf,
+        tcp,
+        ..
       } => {
         spawn(async move {
           trace!("in drop task");
@@ -839,6 +842,7 @@ impl Drop for TlsStream {
               let (tcp, _) = stm.into_inner();
               if let Ok(tcp) = tcp.into_std() {
                 spawn_blocking(move || {
+                  // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
                   trace!("in drop tcp task");
                   // Drop the TCP stream here just in case close() blocks
                   _ = tcp.set_nonblocking(false);
@@ -1873,9 +1877,6 @@ pub(super) mod tests {
     };
 
     let a = spawn(async move {
-      eprintln!("linger = {:?}", server.linger());
-      server.set_linger(Some(Duration::from_secs(10))).unwrap();
-      eprintln!("linger = {:?}", server.linger());
       let (mut r, mut w) = server.into_split();
       let barrier = Arc::new(Barrier::new(2));
       let barrier2 = barrier.clone();
@@ -1906,9 +1907,7 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      eprintln!("dropping");
       drop(r.unsplit(w));
-      eprintln!("dropped");
     });
     let b = spawn(async move {
       eprintln!("task b starting");
@@ -1946,7 +1945,6 @@ pub(super) mod tests {
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
-      server.set_linger(Some(Duration::from_secs(30))).unwrap();
       server.write_all(&buf).await.unwrap();
       server.shutdown().await.unwrap();
       server.close().await.unwrap();
