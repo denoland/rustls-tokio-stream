@@ -1731,12 +1731,24 @@ pub(super) mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(true)]
+  #[case(false)]
   #[tokio::test]
-  async fn large_transfer_no_buffer_limit_or_handshake() -> TestResult {
+  async fn large_transfer_no_buffer_limit_or_handshake(
+    #[case] swap: bool,
+  ) -> TestResult {
     const BUF_SIZE: usize = 64 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair().await;
+    let (server, client) = tls_pair().await;
+
+    let (mut server, mut client) = if swap {
+      (client, server)
+    } else {
+      (server, client)
+    };
+
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
@@ -1759,16 +1771,26 @@ pub(super) mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(true)]
+  #[case(false)]
   #[tokio::test]
-  async fn large_transfer_with_buffer_limit() -> TestResult {
+  async fn large_transfer_with_buffer_limit(#[case] swap: bool) -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair_handshake_buffer_size(
+    let (server, client) = tls_pair_handshake_buffer_size(
       BUF_SIZE.try_into().ok(),
       BUF_SIZE.try_into().ok(),
     )
     .await;
+
+    let (mut server, mut client) = if swap {
+      (client, server)
+    } else {
+      (server, client)
+    };
+
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
@@ -1789,12 +1811,21 @@ pub(super) mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(true)]
+  #[case(false)]
   #[tokio::test(flavor = "current_thread")]
-  async fn large_transfer_with_shutdown() -> TestResult {
+  async fn large_transfer_with_shutdown(#[case] swap: bool) -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair_handshake().await;
+    let (server, client) = tls_pair_handshake().await;
+    let (mut server, mut client) = if swap {
+      (client, server)
+    } else {
+      (server, client)
+    };
+
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
@@ -1815,13 +1846,22 @@ pub(super) mod tests {
     Ok(())
   }
 
+  #[rstest]
+  #[case(true)]
+  #[case(false)]
   #[tokio::test(flavor = "current_thread")]
   #[ntest::timeout(60000)]
-  async fn large_transfer_no_shutdown() -> TestResult {
+  async fn large_transfer_no_shutdown(#[case] swap: bool) -> TestResult {
     const BUF_SIZE: usize = 10 * 1024;
     const BUF_COUNT: usize = 1024;
 
-    let (mut server, mut client) = tls_pair_handshake().await;
+    let (server, client) = tls_pair_handshake().await;
+    let (mut server, mut client) = if swap {
+      (client, server)
+    } else {
+      (server, client)
+    };
+
     let a = spawn(async move {
       // Heap allocate a large buffer and send it
       let buf = vec![42; BUF_COUNT * BUF_SIZE];
