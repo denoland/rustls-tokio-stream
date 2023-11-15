@@ -392,8 +392,12 @@ impl ConnectionStream {
           break loop {
             break match self.poll_write_only(PollContext::Explicit(cx)) {
               StreamProgress::MadeProgress => continue,
+              StreamProgress::Error => {
+                Poll::Ready(Err(self.wr_error.unwrap().into()))
+              }
               StreamProgress::RegisteredWaker if flushing => Poll::Pending,
-              _ => Poll::Ready(Ok(n)),
+              StreamProgress::RegisteredWaker => Poll::Ready(Ok(n)),
+              StreamProgress::NoInterest => Poll::Ready(Ok(n)),
             };
           };
         }
@@ -452,6 +456,7 @@ impl ConnectionStream {
 
     // Don't shut down until we've flushed CloseNotify
     ready!(self.poll_flush(cx)?);
+    debug_assert!(!self.tls.wants_write());
 
     // Note that this is not technically an async call
     // TODO(mmastrac): This is currently untested
@@ -461,6 +466,8 @@ impl ConnectionStream {
     let mut tcp_ptr = unsafe {
       NonNull::new(tcp_ref as *const _ as *mut TcpStream).unwrap_unchecked()
     };
+
+    trace!("poll_shutdown complete");
     // SAFETY: We know that poll_shutdown never uses a mutable reference here
     Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx)
   }
