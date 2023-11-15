@@ -21,10 +21,7 @@ fn trace_result<T>(result: io::Result<T>) -> io::Result<T> {
   result
 }
 
-fn try_read(
-  tcp: &TcpStream,
-  tls: &mut Connection,
-) -> io::Result<()> {
+fn try_read(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
   match read_tls(tcp, tls) {
     Ok(0) => {
       // EOF during handshake
@@ -43,10 +40,7 @@ fn try_read(
   Ok(())
 }
 
-fn try_write(
-  tcp: &TcpStream,
-  tls: &mut Connection,
-) -> io::Result<()> {
+fn try_write(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
   match write_tls(tcp, tls) {
     Ok(_) => {}
     Err(err) if err.kind() == ErrorKind::WouldBlock => {
@@ -87,12 +81,12 @@ impl HandshakeResult {
 }
 
 /// Performs a handshake and returns the [`TcpStream`]/[`Connection`] pair if successful.
-#[cfg(test)]
 pub(crate) async fn handshake_task(
   tcp: Arc<TcpStream>,
   tls: Connection,
+  test_options: TestOptions,
 ) -> io::Result<HandshakeResult> {
-  let res = handshake_task_internal(tcp, tls, TestOptions::default()).await;
+  let res = handshake_task_internal(tcp, tls, test_options).await;
   // Ensure consistency in handshake errors
   match res {
     #[cfg(windows)]
@@ -107,7 +101,7 @@ pub(crate) async fn handshake_task(
   }
 }
 
-pub(crate) async fn handshake_task_internal(
+async fn handshake_task_internal(
   tcp: Arc<TcpStream>,
   mut tls: Connection,
   test_options: TestOptions,
@@ -222,8 +216,16 @@ mod tests {
       ClientConnection::new(client_config().into(), server_name())
         .unwrap()
         .into();
-    let server = spawn(handshake_task(server.into(), tls_server));
-    let client = spawn(handshake_task(client.into(), tls_client));
+    let server = spawn(handshake_task(
+      server.into(),
+      tls_server,
+      TestOptions::default(),
+    ));
+    let client = spawn(handshake_task(
+      client.into(),
+      tls_client,
+      TestOptions::default(),
+    ));
     let (tcp_client, tls_client) = client.await.unwrap().unwrap().reclaim();
     let (tcp_server, tls_server) = server.await.unwrap().unwrap().reclaim();
     assert!(!tls_client.is_handshaking());

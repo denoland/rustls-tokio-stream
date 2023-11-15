@@ -5,7 +5,7 @@ use crate::adapter::clone_result;
 use crate::adapter::read_acceptor;
 use crate::adapter::rustls_to_io_error;
 use crate::connection_stream::ConnectionStream;
-use crate::handshake::handshake_task_internal;
+use crate::handshake::handshake_task;
 use crate::handshake::HandshakeResult;
 use crate::trace;
 use crate::TestOptions;
@@ -561,7 +561,7 @@ async fn send_handshake(
   if test_options.delay_handshake {
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
   }
-  let res = handshake_task_internal(tcp, tls, test_options).await;
+  let res = handshake_task(tcp, tls, test_options).await;
   match &res {
     Ok(res) => {
       // TODO(mmastrac): we should expose peer certificates _somehow_, but we need to solve the copy

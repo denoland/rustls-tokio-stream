@@ -527,6 +527,7 @@ mod tests {
   use crate::tests::server_name;
   use crate::tests::tcp_pair;
   use crate::tests::TestResult;
+  use crate::TestOptions;
   use futures::future::poll_fn;
   use futures::task::noop_waker_ref;
   use rustls::ClientConnection;
@@ -587,8 +588,16 @@ mod tests {
       ClientConnection::new(client_config().into(), server_name())
         .unwrap()
         .into();
-    let server = spawn(handshake_task(server.into(), tls_server));
-    let client = spawn(handshake_task(client.into(), tls_client));
+    let server = spawn(handshake_task(
+      server.into(),
+      tls_server,
+      TestOptions::default(),
+    ));
+    let client = spawn(handshake_task(
+      client.into(),
+      tls_client,
+      TestOptions::default(),
+    ));
     let (tcp_client, tls_client) = client.await.unwrap().unwrap().reclaim();
     let (tcp_server, tls_server) = server.await.unwrap().unwrap().reclaim();
     assert!(!tls_client.is_handshaking());
