@@ -29,6 +29,7 @@ use std::fmt::Debug;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Write;
+use std::mem::ManuallyDrop;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -1895,9 +1896,12 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
+      eprintln!("dropping");
       drop(r.unsplit(w));
+      eprintln!("dropped");
     });
     let b = spawn(async move {
+      eprintln!("task b starting");
       let (mut r, _w) = client.into_split();
       let mut buf = vec![0; BUF_SIZE];
       for i in 0..BUF_COUNT {
