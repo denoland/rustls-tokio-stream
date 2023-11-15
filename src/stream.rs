@@ -840,6 +840,7 @@ impl Drop for TlsStream {
                 // Drop the TCP stream here just in case close() blocks
                 let now = Instant::now();
                 drop(stm);
+                drop(tcp);
                 eprintln!("drop finished after {:?}", now.elapsed());
               });
             }
@@ -1864,7 +1865,7 @@ pub(super) mod tests {
 
     let a = spawn(async move {
       eprintln!("linger = {:?}", server.linger());
-      server.set_linger(Some(Duration::from_secs(60))).unwrap();
+      server.set_linger(Some(Duration::from_secs(10))).unwrap();
       eprintln!("linger = {:?}", server.linger());
       let (mut r, mut w) = server.into_split();
       let barrier = Arc::new(Barrier::new(2));
