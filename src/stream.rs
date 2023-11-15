@@ -1907,7 +1907,7 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      drop(r.unsplit(w));
+      r.unsplit(w).close().await.unwrap();
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
