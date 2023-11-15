@@ -1910,7 +1910,6 @@ pub(super) mod tests {
       drop(r.unsplit(w));
     });
     let b = spawn(async move {
-      eprintln!("task b starting");
       let (mut r, _w) = client.into_split();
       let mut buf = vec![0; BUF_SIZE];
       for i in 0..BUF_COUNT {
