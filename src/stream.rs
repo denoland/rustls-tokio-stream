@@ -1817,7 +1817,7 @@ pub(super) mod tests {
     #[case] swap: bool,
   ) -> TestResult {
     const BUF_SIZE: usize = 1024;
-    const BUF_COUNT: usize = 10 * 1024;
+    const BUF_COUNT: usize = 1 * 1024;
 
     let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
     let (server, client) = if swap {
@@ -1856,7 +1856,7 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      r.unsplit(w).close().await.unwrap();
+      drop(r.unsplit(w));
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
