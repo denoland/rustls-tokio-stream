@@ -619,6 +619,7 @@ fn nonblocking_tcp_drop(tcp: TcpStream) {
       trace!("in drop tcp task");
       // Drop the TCP stream here just in case close() blocks
       _ = tcp.set_nonblocking(false);
+      _ = tcp.shutdown(std::net::Shutdown::Read);
       // sleep(Duration::from_secs(1));
       drop(tcp);
       trace!("done drop tcp task");
