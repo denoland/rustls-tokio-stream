@@ -1,18 +1,16 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use rustls::Connection;
 use rustls::IoState;
+use socket2::SockRef;
 use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
-use std::pin::Pin;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
-use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
@@ -464,18 +462,10 @@ impl ConnectionStream {
     ready!(self.poll_flush(cx)?);
     debug_assert!(!self.tls.wants_write());
 
-    // Note that this is not technically an async call
-    // TODO(mmastrac): This is currently untested
-    let tcp_ref: &TcpStream = &self.tcp;
-    // TODO(mmastrac): This should probably be done by going deeper into mio instead of this hackery
-    // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    let mut tcp_ptr = unsafe {
-      NonNull::new(tcp_ref as *const _ as *mut TcpStream).unwrap_unchecked()
-    };
+    _ = SockRef::from(&self.tcp).shutdown(std::net::Shutdown::Write);
 
     trace!("poll_shutdown complete");
-    // SAFETY: We know that poll_shutdown never uses a mutable reference here
-    _ = Pin::new(unsafe { tcp_ptr.as_mut() }).poll_shutdown(cx);
+
     Poll::Ready(Ok(()))
   }
 }
@@ -483,7 +473,7 @@ impl ConnectionStream {
 #[cfg(test)]
 impl tokio::io::AsyncRead for ConnectionStream {
   fn poll_read(
-    self: Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<()>> {
@@ -494,7 +484,7 @@ impl tokio::io::AsyncRead for ConnectionStream {
 #[cfg(test)]
 impl tokio::io::AsyncWrite for ConnectionStream {
   fn poll_write(
-    self: Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
     buf: &[u8],
   ) -> Poll<Result<usize, io::Error>> {
@@ -502,7 +492,7 @@ impl tokio::io::AsyncWrite for ConnectionStream {
   }
 
   fn poll_write_vectored(
-    self: Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
     bufs: &[futures::io::IoSlice<'_>],
   ) -> Poll<Result<usize, io::Error>> {
@@ -516,14 +506,14 @@ impl tokio::io::AsyncWrite for ConnectionStream {
   }
 
   fn poll_flush(
-    self: Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), io::Error>> {
     ConnectionStream::poll_flush(self.get_mut(), cx)
   }
 
   fn poll_shutdown(
-    self: Pin<&mut Self>,
+    self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), io::Error>> {
     ConnectionStream::poll_shutdown(self.get_mut(), cx)

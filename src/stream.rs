@@ -18,6 +18,7 @@ use futures::Future;
 use futures::FutureExt;
 use rustls::server::Acceptor;
 use rustls::server::ClientHello;
+use rustls::version::TLS13;
 use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
@@ -541,6 +542,7 @@ impl TlsStream {
             let mut stm = ConnectionStream::new(tcp, tls);
             poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
             poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+            nonblocking_tcp_drop(stm);
           }
           Err(err) => {
             if err.is_panic() {
@@ -557,6 +559,7 @@ impl TlsStream {
       }
       TlsStreamState::Open(mut stm) => {
         poll_fn(|cx| stm.poll_shutdown(cx)).await?;
+        nonblocking_tcp_drop(stm);
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         // Nothing
@@ -605,6 +608,31 @@ async fn send_handshake(
     }
   }
   res
+}
+
+/// TLS 1.3 may yield a state where the client has sent a large stream of data and closed
+/// the connection before receiving anything from the server. The server may attempt to
+/// send the final part of its handshake to the client's closed socket, which yields a TCP
+/// reset and then causes the server to throw away its received buffer. This holds a TCP
+/// socket open for a shortly extended period of time if we have a TLS 1.3 client.
+fn nonblocking_tcp_drop(stm: ConnectionStream) {
+  // TODO(mmastrac) A better fix would be detecting that the server has sent at least one post-handshake packet,
+  // which would indicate that it's safe to close at this point.
+  let (tcp, tls) = stm.into_inner();
+  if matches!(tls, Connection::Client(_))
+    && tls.protocol_version() == Some(TLS13.version)
+  {
+    if let Ok(tcp) = tcp.into_std() {
+      spawn_blocking(move || {
+        trace!("in drop tcp task");
+        sleep(Duration::from_millis(100));
+        drop(tcp);
+        trace!("done drop tcp task");
+      });
+    }
+  } else {
+    drop(tcp);
+  }
 }
 
 impl AsyncRead for TlsStream {
@@ -839,18 +867,7 @@ impl Drop for TlsStream {
               stm.write_buf_fully(&write_buf);
               let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
               trace!("shutdown handshake {:?}", res);
-              let (tcp, _) = stm.into_inner();
-              if let Ok(tcp) = tcp.into_std() {
-                spawn_blocking(move || {
-                  // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
-                  trace!("in drop tcp task");
-                  // Drop the TCP stream here just in case close() blocks
-                  _ = tcp.set_nonblocking(false);
-                  sleep(Duration::from_secs(1));
-                  drop(tcp);
-                  trace!("done drop tcp task");
-                });
-              }
+              nonblocking_tcp_drop(stm);
             }
             x @ Err(_) => {
               trace!("{x:?}");
@@ -867,17 +884,7 @@ impl Drop for TlsStream {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("shutdown open {:?}", res);
-          let (tcp, _) = stm.into_inner();
-          if let Ok(tcp) = tcp.into_std() {
-            spawn_blocking(move || {
-              trace!("in drop tcp task");
-              // Drop the TCP stream here just in case close() blocks
-              _ = tcp.set_nonblocking(false);
-              sleep(Duration::from_secs(1));
-              drop(tcp);
-              trace!("done drop tcp task");
-            });
-          }
+          nonblocking_tcp_drop(stm);
           trace!("done drop task");
         });
       }
@@ -1031,8 +1038,10 @@ pub(super) mod tests {
   use rstest::rstest;
   use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
+  use rustls::version::TLS12;
   use rustls::Certificate;
   use rustls::PrivateKey;
+  use rustls::SupportedProtocolVersion;
   use std::io::BufRead;
   use std::io::ErrorKind;
   use std::io::IoSlice;
@@ -1104,6 +1113,20 @@ pub(super) mod tests {
     config
   }
 
+  fn server_config_protocol(
+    protocol: &'static SupportedProtocolVersion,
+  ) -> ServerConfig {
+    let config = ServerConfig::builder()
+      .with_safe_default_cipher_suites()
+      .with_safe_default_kx_groups()
+      .with_protocol_versions(&[protocol])
+      .unwrap()
+      .with_no_client_auth()
+      .with_single_cert(vec![certificate()], private_key())
+      .expect("Failed to build server config");
+    config
+  }
+
   fn client_config(alpn: &[&str]) -> ClientConfig {
     let mut config = ClientConfig::builder()
       .with_safe_defaults()
@@ -1138,6 +1161,26 @@ pub(super) mod tests {
 
   pub async fn tls_pair() -> (TlsStream, TlsStream) {
     tls_pair_buffer_size(None).await
+  }
+
+  pub async fn tls_pair_protocol(
+    buffer_size: Option<NonZeroUsize>,
+    protocol: &'static SupportedProtocolVersion,
+  ) -> (TlsStream, TlsStream) {
+    let (server, client) = tcp_pair().await;
+    let server = TlsStream::new_server_side(
+      server,
+      server_config_protocol(protocol).into(),
+      None,
+    );
+    let client = TlsStream::new_client_side(
+      client,
+      client_config(&[]).into(),
+      "example.com".try_into().unwrap(),
+      buffer_size,
+    );
+
+    (server, client)
   }
 
   pub async fn tls_pair_buffer_size(
@@ -1860,16 +1903,20 @@ pub(super) mod tests {
   }
 
   #[rstest]
-  #[case(true)]
-  #[case(false)]
+  #[case(true, &TLS12)]
+  #[case(false, &TLS12)]
+  #[case(true, &TLS13)]
+  #[case(false, &TLS13)]
   #[tokio::test]
-  async fn large_transfer_with_buffer_limit_split(
+  async fn large_transfer_with_aggressive_close_split(
     #[case] swap: bool,
+    #[case] protocol: &'static SupportedProtocolVersion,
   ) -> TestResult {
     const BUF_SIZE: usize = 1024;
     const BUF_COUNT: usize = 1 * 1024;
 
-    let (server, client) = tls_pair_buffer_size(NonZeroUsize::new(65536)).await;
+    let (server, client) =
+      tls_pair_protocol(NonZeroUsize::new(65536), protocol).await;
     let (server, client) = if swap {
       (client, server)
     } else {
@@ -1907,7 +1954,10 @@ pub(super) mod tests {
 
       let r = a.await.unwrap();
       let w = b.await.unwrap();
-      drop(r.unsplit(w));
+      // In TLS1.3, this aggressive close can cause the other side to lose its buffer
+      // if the handshake is not fully completed because we send a TCP RST if we receive
+      // anything further.
+      r.unsplit(w).close().await.unwrap();
     });
     let b = spawn(async move {
       let (mut r, _w) = client.into_split();
