@@ -24,6 +24,7 @@ use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
 use rustls::ServerName;
+use rustls::version::TLS13;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
@@ -541,8 +542,7 @@ impl TlsStream {
             let mut stm = ConnectionStream::new(tcp, tls);
             poll_fn(|cx| stm.poll_write(cx, &buf)).await?;
             poll_fn(|cx| stm.poll_shutdown(cx)).await?;
-            let (tcp, _) = stm.into_inner();
-            nonblocking_tcp_drop(tcp);
+            nonblocking_tcp_drop(stm);
           }
           Err(err) => {
             if err.is_panic() {
@@ -559,8 +559,7 @@ impl TlsStream {
       }
       TlsStreamState::Open(mut stm) => {
         poll_fn(|cx| stm.poll_shutdown(cx)).await?;
-        let (tcp, _) = stm.into_inner();
-        nonblocking_tcp_drop(tcp);
+        nonblocking_tcp_drop(stm);
       }
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         // Nothing
@@ -611,19 +610,29 @@ async fn send_handshake(
   res
 }
 
-fn nonblocking_tcp_drop(tcp: TcpStream) {
-  _ = tcp.set_linger(Some(Duration::from_millis(1000)));
-  if let Ok(tcp) = tcp.into_std() {
-    spawn_blocking(move || {
-      // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
-      trace!("in drop tcp task");
-      // Drop the TCP stream here just in case close() blocks
-      _ = tcp.set_nonblocking(false);
-      _ = tcp.shutdown(std::net::Shutdown::Read);
-      // sleep(Duration::from_secs(1));
-      drop(tcp);
-      trace!("done drop tcp task");
-    });
+/// TLS 1.3 may yield a state where the client has sent a large stream of data and closed
+/// the connection before receiving anything from the server. The server may attempt to
+/// send the final part of its handshake to the client's closed socket, which yields a TCP
+/// reset and then causes the server to throw away its received buffer. This holds a TCP
+/// socket open for a shortly extended period of time if we have a TLS 1.3 client.
+fn nonblocking_tcp_drop(stm: ConnectionStream) {
+  // TODO(mmastrac) A better fix would be detecting that the server has sent at least one post-handshake packet,
+  // which would indicate that it's safe to close at this point.
+  let (tcp, tls) = stm.into_inner();
+  if matches!(tls, Connection::Client(_)) && tls.protocol_version() == Some(TLS13.version) {
+    if let Ok(tcp) = tcp.into_std() {
+      spawn_blocking(move || {
+        // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
+        trace!("in drop tcp task");
+        // Drop the TCP stream here just in case close() blocks
+        _ = tcp.set_nonblocking(false);
+        sleep(Duration::from_millis(100));
+        drop(tcp);
+        trace!("done drop tcp task");
+      });
+    }
+  } else {
+    drop(tcp);
   }
 }
 
@@ -877,8 +886,7 @@ impl Drop for TlsStream {
           trace!("in drop task");
           let res = poll_fn(|cx| stm.poll_shutdown(cx)).await;
           trace!("shutdown open {:?}", res);
-          let (tcp, _) = stm.into_inner();
-          nonblocking_tcp_drop(tcp);
+          nonblocking_tcp_drop(stm);
           trace!("done drop task");
         });
       }
@@ -1030,13 +1038,10 @@ pub(super) mod tests {
   use futures::FutureExt;
   use futures::StreamExt;
   use rstest::rstest;
-  use rustls::SupportedProtocolVersion;
-use rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
-use rustls::client::ServerCertVerified;
+  use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
   use rustls::Certificate;
   use rustls::PrivateKey;
-use rustls::version::TLS12;
   use std::io::BufRead;
   use std::io::ErrorKind;
   use std::io::IoSlice;
@@ -1110,10 +1115,7 @@ use rustls::version::TLS12;
 
   fn client_config(alpn: &[&str]) -> ClientConfig {
     let mut config = ClientConfig::builder()
-      .with_safe_default_cipher_suites()
-      .with_safe_default_kx_groups()
-      .with_protocol_versions(&[&TLS12])
-      .unwrap()
+      .with_safe_defaults()
       .with_custom_certificate_verifier(Arc::new(UnsafeVerifier {}))
       .with_no_client_auth();
     config.alpn_protocols =
