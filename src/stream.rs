@@ -624,10 +624,7 @@ fn nonblocking_tcp_drop(stm: ConnectionStream) {
   {
     if let Ok(tcp) = tcp.into_std() {
       spawn_blocking(move || {
-        // TODO(mmastrac): this should not be necessary with SO_LINGER but I cannot get that working
         trace!("in drop tcp task");
-        // Drop the TCP stream here just in case close() blocks
-        _ = tcp.set_nonblocking(false);
         sleep(Duration::from_millis(100));
         drop(tcp);
         trace!("done drop tcp task");
