@@ -1030,10 +1030,13 @@ pub(super) mod tests {
   use futures::FutureExt;
   use futures::StreamExt;
   use rstest::rstest;
-  use rustls::client::ServerCertVerified;
+  use rustls::SupportedProtocolVersion;
+use rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+use rustls::client::ServerCertVerified;
   use rustls::client::ServerCertVerifier;
   use rustls::Certificate;
   use rustls::PrivateKey;
+use rustls::version::TLS12;
   use std::io::BufRead;
   use std::io::ErrorKind;
   use std::io::IoSlice;
@@ -1107,7 +1110,10 @@ pub(super) mod tests {
 
   fn client_config(alpn: &[&str]) -> ClientConfig {
     let mut config = ClientConfig::builder()
-      .with_safe_defaults()
+      .with_safe_default_cipher_suites()
+      .with_safe_default_kx_groups()
+      .with_protocol_versions(&[&TLS12])
+      .unwrap()
       .with_custom_certificate_verifier(Arc::new(UnsafeVerifier {}))
       .with_no_client_auth();
     config.alpn_protocols =
