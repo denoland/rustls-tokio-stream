@@ -27,6 +27,15 @@ struct TestOptions {
   slow_handshake_write: bool,
 }
 
+#[cfg(feature = "trace")]
+static ENABLE_BYTE_TRACING: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "trace")]
+pub fn enable_byte_tracing() {
+  ENABLE_BYTE_TRACING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 macro_rules! trace {
   ($($args:expr),+) => {
     if cfg!(feature="trace")

@@ -24,3 +24,6 @@ rustls = { version = "0.21", features = [ "dangerous_configuration" ] }
 ntest = "0.9"
 rstest = "0.18"
 fastwebsockets = { version = "=0.5.0", features = [ "unstable-split" ] }
+
+[[example]]
+name = "ssl_trace"

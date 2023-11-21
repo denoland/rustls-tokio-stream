@@ -54,6 +54,12 @@ impl Read for ImplementReadTrait<'_, TcpStream> {
   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
     let res = self.0.try_read(buf);
     trace!("r({})={:?}", buf.len(), res);
+    #[cfg(feature = "trace")]
+    if let Ok(n) = res {
+      if crate::ENABLE_BYTE_TRACING.load(std::sync::atomic::Ordering::SeqCst) {
+        trace!("{:02x?}", &buf[0..n]);
+      }
+    }
     match res {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
@@ -68,6 +74,10 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     let res = self.0.try_write(buf);
     trace!("w={:?}", res);
+    #[cfg(feature = "trace")]
+    if crate::ENABLE_BYTE_TRACING.load(std::sync::atomic::Ordering::SeqCst) {
+      trace!("{buf:02x?}");
+    }
     match res {
       Ok(n) => Ok(n),
       Err(err) if err.kind() == ErrorKind::WouldBlock => Err(err),
