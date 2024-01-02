@@ -1,28 +1,48 @@
-use rustls::client::ServerCertVerified;
-use rustls::client::ServerCertVerifier;
-use rustls::server::DnsName;
-use rustls::Certificate;
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
-use rustls::ServerName;
 use rustls_tokio_stream::TlsStream;
 use std::env;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
+#[derive(Debug)]
 pub struct UnsafeVerifier {}
 
 impl ServerCertVerifier for UnsafeVerifier {
+  fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+    vec![rustls::SignatureScheme::RSA_PKCS1_SHA1]
+  }
+
+  fn verify_tls12_signature(
+    &self,
+    _message: &[u8],
+    _cert: &rustls::pki_types::CertificateDer<'_>,
+    _dss: &rustls::DigitallySignedStruct,
+  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+  {
+    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  }
+
+  fn verify_tls13_signature(
+    &self,
+    _message: &[u8],
+    _cert: &rustls::pki_types::CertificateDer<'_>,
+    _dss: &rustls::DigitallySignedStruct,
+  ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+  {
+    Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+  }
+
   fn verify_server_cert(
     &self,
-    _end_entity: &Certificate,
-    _intermediates: &[Certificate],
-    _server_name: &ServerName,
-    _scts: &mut dyn Iterator<Item = &[u8]>,
+    _end_entity: &rustls::pki_types::CertificateDer<'_>,
+    _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+    _server_name: &ServerName<'_>,
     _ocsp_response: &[u8],
-    _now: std::time::SystemTime,
-  ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-    Ok(ServerCertVerified::assertion())
+    _now: rustls::pki_types::UnixTime,
+  ) -> Result<ServerCertVerified, rustls::Error> {
+    Ok(rustls::client::danger::ServerCertVerified::assertion())
   }
 }
 
@@ -46,13 +66,13 @@ pub async fn main() {
     .expect("Could not connect");
   println!("Initiating TLS...");
   let config = ClientConfig::builder()
-    .with_safe_defaults()
+    .dangerous()
     .with_custom_certificate_verifier(Arc::new(UnsafeVerifier {}))
     .with_no_client_auth();
   let mut stm = TlsStream::new_client_side(
     tcp,
     Arc::new(config),
-    ServerName::try_from(address.as_str())
+    ServerName::try_from(address)
       .expect("Failed to parse address as a server name"),
     None,
   );

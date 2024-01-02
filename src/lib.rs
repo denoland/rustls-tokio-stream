@@ -52,13 +52,13 @@ pub(crate) use trace;
 mod tests {
   pub use super::stream::tests::tls_pair;
   pub use super::stream::tests::tls_pair_buffer_size;
-  use rustls::client::ServerCertVerified;
-  use rustls::client::ServerCertVerifier;
-  use rustls::Certificate;
+  use rustls::client::danger::ServerCertVerified;
+  use rustls::client::danger::ServerCertVerifier;
+  use rustls::pki_types::CertificateDer;
+  use rustls::pki_types::PrivateKeyDer;
+  use rustls::pki_types::ServerName;
   use rustls::ClientConfig;
-  use rustls::PrivateKey;
   use rustls::ServerConfig;
-  use rustls::ServerName;
   use std::io;
   use std::io::BufRead;
   use std::net::Ipv4Addr;
@@ -72,44 +72,68 @@ mod tests {
 
   pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+  #[derive(Debug)]
   pub struct UnsafeVerifier {}
 
   impl ServerCertVerifier for UnsafeVerifier {
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+      vec![rustls::SignatureScheme::RSA_PSS_SHA256]
+    }
+
+    fn verify_tls12_signature(
+      &self,
+      _message: &[u8],
+      _cert: &rustls::pki_types::CertificateDer<'_>,
+      _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+      Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+      &self,
+      _message: &[u8],
+      _cert: &rustls::pki_types::CertificateDer<'_>,
+      _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+      Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
     fn verify_server_cert(
       &self,
-      _end_entity: &Certificate,
-      _intermediates: &[Certificate],
-      _server_name: &ServerName,
-      _scts: &mut dyn Iterator<Item = &[u8]>,
+      _end_entity: &rustls::pki_types::CertificateDer<'_>,
+      _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+      _server_name: &ServerName<'_>,
       _ocsp_response: &[u8],
-      _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-      Ok(ServerCertVerified::assertion())
+      _now: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+      Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
   }
 
-  pub fn certificate() -> Certificate {
+  pub fn certificate() -> CertificateDer<'static> {
     let buf_read: &mut dyn BufRead =
       &mut &include_bytes!("testdata/localhost.crt")[..];
     let cert = rustls_pemfile::read_one(buf_read)
       .expect("Failed to load test cert")
       .unwrap();
     match cert {
-      rustls_pemfile::Item::X509Certificate(cert) => Certificate(cert),
+      rustls_pemfile::Item::X509Certificate(cert) => cert,
       _ => {
         panic!("Unexpected item")
       }
     }
   }
 
-  pub fn private_key() -> PrivateKey {
+  pub fn private_key() -> PrivateKeyDer<'static> {
     let buf_read: &mut dyn BufRead =
       &mut &include_bytes!("testdata/localhost.key")[..];
     let cert = rustls_pemfile::read_one(buf_read)
       .expect("Failed to load test key")
       .unwrap();
     match cert {
-      rustls_pemfile::Item::PKCS8Key(key) => PrivateKey(key),
+      rustls_pemfile::Item::Pkcs8Key(key) => key.into(),
       _ => {
         panic!("Unexpected item")
       }
@@ -118,7 +142,6 @@ mod tests {
 
   pub fn server_config() -> ServerConfig {
     ServerConfig::builder()
-      .with_safe_defaults()
       .with_no_client_auth()
       .with_single_cert(vec![certificate()], private_key())
       .expect("Failed to build server config")
@@ -126,12 +149,12 @@ mod tests {
 
   pub fn client_config() -> ClientConfig {
     ClientConfig::builder()
-      .with_safe_defaults()
+      .dangerous()
       .with_custom_certificate_verifier(Arc::new(UnsafeVerifier {}))
       .with_no_client_auth()
   }
 
-  pub fn server_name() -> ServerName {
+  pub fn server_name() -> ServerName<'static> {
     "example.com".try_into().unwrap()
   }
 
