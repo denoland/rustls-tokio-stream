@@ -10,7 +10,6 @@ use crate::handshake::HandshakeResult;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
-use futures::task::noop_waker_ref;
 use futures::task::Context;
 use futures::task::Poll;
 use futures::task::Waker;
@@ -648,11 +647,8 @@ impl AsyncRead for TlsStream {
         } => {
           // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) =
-              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
-            else {
-              unreachable!()
-            };
+            // This may return Pending if we've exhausted the co-op budget
+            let res = ready!(handle.poll_unpin(cx));
             self.finalize_handshake(res)?;
             continue;
           }
@@ -695,11 +691,8 @@ impl AsyncWrite for TlsStream {
         } => {
           // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) =
-              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
-            else {
-              unreachable!()
-            };
+            // This may return Pending if we've exhausted the co-op budget
+            let res = ready!(handle.poll_unpin(cx));
             self.finalize_handshake(res)?;
             continue;
           }
@@ -752,11 +745,8 @@ impl AsyncWrite for TlsStream {
         } => {
           // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) =
-              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
-            else {
-              unreachable!()
-            };
+            // This may return Pending if we've exhausted the co-op budget
+            let res = ready!(handle.poll_unpin(cx));
             self.finalize_handshake(res)?;
             continue;
           }
@@ -809,12 +799,10 @@ impl AsyncWrite for TlsStream {
           handle,
           ..
         } => {
+          // If the handshake completed, we want to finalize it and then continue
           if handle.is_finished() {
-            let Poll::Ready(res) =
-              handle.poll_unpin(&mut Context::from_waker(noop_waker_ref()))
-            else {
-              unreachable!()
-            };
+            // This may return Pending if we've exhausted the co-op budget
+            let res = ready!(handle.poll_unpin(cx));
             self.finalize_handshake(res)?;
             continue;
           }
