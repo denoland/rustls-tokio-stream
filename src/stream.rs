@@ -15,6 +15,7 @@ use futures::task::Poll;
 use futures::task::Waker;
 use futures::Future;
 use futures::FutureExt;
+use rustls::pki_types::ServerName;
 use rustls::server::Acceptor;
 use rustls::server::ClientHello;
 use rustls::version::TLS13;
@@ -23,7 +24,6 @@ use rustls::ClientConnection;
 use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
-use rustls::ServerName;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::io;
@@ -222,7 +222,7 @@ impl TlsStream {
   pub fn new_client_side(
     tcp: TcpStream,
     tls_config: Arc<ClientConfig>,
-    server_name: ServerName,
+    server_name: ServerName<'static>,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
     let tls = ClientConnection::new(tls_config, server_name).unwrap();
@@ -238,7 +238,7 @@ impl TlsStream {
   pub(crate) fn new_client_side_test_options(
     tcp: TcpStream,
     tls_config: Arc<ClientConfig>,
-    server_name: ServerName,
+    server_name: ServerName<'static>,
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
   ) -> Self {
@@ -1019,18 +1019,16 @@ impl AsyncWrite for TlsStreamWrite {
 #[cfg(test)]
 pub(super) mod tests {
   use super::*;
+  use crate::tests::certificate;
   use crate::tests::expect_io_error;
+  use crate::tests::private_key;
+  use crate::tests::UnsafeVerifier;
   use futures::stream::FuturesUnordered;
   use futures::FutureExt;
   use futures::StreamExt;
   use rstest::rstest;
-  use rustls::client::ServerCertVerified;
-  use rustls::client::ServerCertVerifier;
   use rustls::version::TLS12;
-  use rustls::Certificate;
-  use rustls::PrivateKey;
   use rustls::SupportedProtocolVersion;
-  use std::io::BufRead;
   use std::io::ErrorKind;
   use std::io::IoSlice;
   use std::net::Ipv4Addr;
@@ -1046,53 +1044,8 @@ pub(super) mod tests {
 
   type TestResult = Result<(), std::io::Error>;
 
-  struct UnsafeVerifier {}
-
-  impl ServerCertVerifier for UnsafeVerifier {
-    fn verify_server_cert(
-      &self,
-      _end_entity: &Certificate,
-      _intermediates: &[Certificate],
-      _server_name: &ServerName,
-      _scts: &mut dyn Iterator<Item = &[u8]>,
-      _ocsp_response: &[u8],
-      _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-      Ok(ServerCertVerified::assertion())
-    }
-  }
-
-  fn certificate() -> Certificate {
-    let buf_read: &mut dyn BufRead =
-      &mut &include_bytes!("testdata/localhost.crt")[..];
-    let cert = rustls_pemfile::read_one(buf_read)
-      .expect("Failed to load test cert")
-      .unwrap();
-    match cert {
-      rustls_pemfile::Item::X509Certificate(cert) => Certificate(cert),
-      _ => {
-        panic!("Unexpected item")
-      }
-    }
-  }
-
-  fn private_key() -> PrivateKey {
-    let buf_read: &mut dyn BufRead =
-      &mut &include_bytes!("testdata/localhost.key")[..];
-    let cert = rustls_pemfile::read_one(buf_read)
-      .expect("Failed to load test key")
-      .unwrap();
-    match cert {
-      rustls_pemfile::Item::PKCS8Key(key) => PrivateKey(key),
-      _ => {
-        panic!("Unexpected item")
-      }
-    }
-  }
-
   fn server_config(alpn: &[&str]) -> ServerConfig {
     let mut config = ServerConfig::builder()
-      .with_safe_defaults()
       .with_no_client_auth()
       .with_single_cert(vec![certificate()], private_key())
       .expect("Failed to build server config");
@@ -1104,11 +1057,7 @@ pub(super) mod tests {
   fn server_config_protocol(
     protocol: &'static SupportedProtocolVersion,
   ) -> ServerConfig {
-    let config = ServerConfig::builder()
-      .with_safe_default_cipher_suites()
-      .with_safe_default_kx_groups()
-      .with_protocol_versions(&[protocol])
-      .unwrap()
+    let config = ServerConfig::builder_with_protocol_versions(&[protocol])
       .with_no_client_auth()
       .with_single_cert(vec![certificate()], private_key())
       .expect("Failed to build server config");
@@ -1117,7 +1066,7 @@ pub(super) mod tests {
 
   fn client_config(alpn: &[&str]) -> ClientConfig {
     let mut config = ClientConfig::builder()
-      .with_safe_defaults()
+      .dangerous()
       .with_custom_certificate_verifier(Arc::new(UnsafeVerifier {}))
       .with_no_client_auth();
     config.alpn_protocols =

@@ -13,17 +13,17 @@ trace = []
 
 [dependencies]
 tokio = { version = "1", features = [ "io-util", "net", "rt", "sync" ] }
-rustls = "0.21"
+rustls = "0.22"
 futures = "0.3"
 socket2 = "0.5"
 
 [dev_dependencies]
 tokio = { version = "1", features = [ "full" ] }
-rustls-pemfile = "1.0"
-rustls = { version = "0.21", features = [ "dangerous_configuration" ] }
+rustls-pemfile = "2.0.0"
+rustls = { version = "0.22" }
 ntest = "0.9"
 rstest = "0.18"
-fastwebsockets = { version = "=0.5.0", features = [ "unstable-split" ] }
+fastwebsockets = { version = "=0.6.0", features = [ "unstable-split" ] }
 
 [[example]]
 name = "ssl_trace"
