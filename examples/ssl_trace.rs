@@ -1,6 +1,6 @@
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::ServerName;
-use rustls::ClientConfig;
+use rustls::{ClientConfig, ClientConnection};
 use rustls_tokio_stream::TlsStream;
 use std::env;
 use std::sync::Arc;
@@ -71,9 +71,12 @@ pub async fn main() {
     .with_no_client_auth();
   let mut stm = TlsStream::new_client_side(
     tcp,
-    Arc::new(config),
-    ServerName::try_from(address)
-      .expect("Failed to parse address as a server name"),
+    ClientConnection::new(
+      Arc::new(config),
+      ServerName::try_from(address)
+        .expect("Failed to parse address as a server name"),
+    )
+    .unwrap(),
     None,
   );
 

@@ -20,7 +20,6 @@ socket2 = "0.5"
 [dev_dependencies]
 tokio = { version = "1", features = [ "full" ] }
 rustls-pemfile = "2.0.0"
-rustls = { version = "0.22" }
 ntest = "0.9"
 rstest = "0.18"
 fastwebsockets = { version = "=0.6.0", features = [ "unstable-split" ] }

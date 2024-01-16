@@ -16,11 +16,9 @@ use futures::task::Poll;
 use futures::task::Waker;
 use futures::Future;
 use futures::FutureExt;
-use rustls::pki_types::ServerName;
 use rustls::server::Acceptor;
 use rustls::server::ClientHello;
 use rustls::version::TLS13;
-use rustls::ClientConfig;
 use rustls::ClientConnection;
 use rustls::Connection;
 use rustls::ServerConfig;
@@ -232,11 +230,9 @@ impl TlsStream {
 
   pub fn new_client_side(
     tcp: TcpStream,
-    tls_config: Arc<ClientConfig>,
-    server_name: ServerName<'static>,
+    tls: ClientConnection,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
-    let tls = ClientConnection::new(tls_config, server_name).unwrap();
     Self::new(
       tcp,
       Connection::Client(tls),
@@ -248,12 +244,13 @@ impl TlsStream {
   #[cfg(test)]
   pub(crate) fn new_client_side_test_options(
     tcp: TcpStream,
-    tls_config: Arc<ClientConfig>,
-    server_name: ServerName<'static>,
+    tls_config: Arc<rustls::ClientConfig>,
+    server_name: rustls::pki_types::ServerName<'_>,
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
   ) -> Self {
-    let tls = ClientConnection::new(tls_config, server_name).unwrap();
+    let tls =
+      ClientConnection::new(tls_config, server_name.to_owned()).unwrap();
     Self::new(tcp, Connection::Client(tls), buffer_size, test_options)
   }
 
@@ -1070,6 +1067,7 @@ pub(super) mod tests {
   use futures::StreamExt;
   use rstest::rstest;
   use rustls::version::TLS12;
+  use rustls::ClientConfig;
   use rustls::SupportedProtocolVersion;
   use std::io::ErrorKind;
   use std::io::IoSlice;
@@ -1152,11 +1150,12 @@ pub(super) mod tests {
       server_config_protocol(protocol).into(),
       None,
     );
-    let client = TlsStream::new_client_side(
+    let client = TlsStream::new_client_side_test_options(
       client,
       client_config(&[]).into(),
       "example.com".try_into().unwrap(),
       buffer_size,
+      TestOptions::default(),
     );
 
     (server, client)
@@ -1168,11 +1167,12 @@ pub(super) mod tests {
     let (server, client) = tcp_pair().await;
     let server =
       TlsStream::new_server_side(server, server_config(&[]).into(), None);
-    let client = TlsStream::new_client_side(
+    let client = TlsStream::new_client_side_test_options(
       client,
       client_config(&[]).into(),
       "example.com".try_into().unwrap(),
       buffer_size,
+      TestOptions::default(),
     );
 
     (server, client)
@@ -1241,11 +1241,12 @@ pub(super) mod tests {
       server_config(server_alpn).into(),
       server_buffer_size,
     );
-    let client = TlsStream::new_client_side(
+    let client = TlsStream::new_client_side_test_options(
       client,
       client_config(client_alpn).into(),
       "example.com".try_into().unwrap(),
       client_buffer_size,
+      TestOptions::default(),
     );
 
     (server, client)
@@ -1271,11 +1272,12 @@ pub(super) mod tests {
       }),
       server_buffer_size,
     );
-    let client = TlsStream::new_client_side(
+    let client = TlsStream::new_client_side_test_options(
       client,
       client_config(client_alpn).into(),
       "example.com".try_into().unwrap(),
       client_buffer_size,
+      TestOptions::default(),
     );
 
     (server, client)
