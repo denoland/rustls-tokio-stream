@@ -10,6 +10,7 @@ use crate::handshake::HandshakeResult;
 use crate::trace;
 use crate::TestOptions;
 use futures::future::poll_fn;
+use futures::task::AtomicWaker;
 use futures::task::Context;
 use futures::task::Poll;
 use futures::task::Waker;
@@ -33,6 +34,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::ready;
 use std::thread::sleep;
 use std::time::Duration;
@@ -41,7 +43,6 @@ use tokio::io::AsyncWrite;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio::spawn;
-use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
@@ -60,6 +61,13 @@ impl SharedWaker {
   pub fn set_waker(&self, waker: &Waker) {
     self.0.set(Some(waker.clone()))
   }
+}
+
+#[derive(Default)]
+struct HandshakeWatch {
+  handshake: Mutex<Option<io::Result<TlsHandshake>>>,
+  rx_waker: AtomicWaker,
+  tx_waker: AtomicWaker,
 }
 
 enum TlsStreamState {
@@ -92,7 +100,7 @@ pub type ServerConfigProvider = Arc<
 pub struct TlsStream {
   state: TlsStreamState,
 
-  handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
+  handshake: Arc<HandshakeWatch>,
   buffer_size: Option<NonZeroUsize>,
 }
 
@@ -104,7 +112,7 @@ impl Debug for TlsStream {
       }
       TlsStreamState::Open(..) => f.write_fmt(format_args!(
         "TlsStream {{ Open, handshake: {:?} }}",
-        self.handshake.borrow()
+        self.handshake.handshake.lock().unwrap()
       )),
       TlsStreamState::Closed => f.write_str("TlsStream { Closed }"),
       TlsStreamState::ClosedError(err) => {
@@ -131,7 +139,7 @@ impl TlsStream {
     test_options: TestOptions,
   ) -> Self {
     tls.set_buffer_limit(buffer_size.map(|s| s.get()));
-    let (tx, handshake) = watch::channel(None);
+    let handshake = Arc::new(HandshakeWatch::default());
     let read_waker = SharedWaker::default();
     let write_waker = SharedWaker::default();
     let read_waker_clone = read_waker.clone();
@@ -139,8 +147,10 @@ impl TlsStream {
     let tcp = Arc::new(tcp);
     let tcp_handshake = tcp.clone();
 
+    let handshake_send = handshake.clone();
     let handle = spawn(async move {
-      let res = send_handshake(tcp_handshake, tls, test_options, tx).await;
+      let res =
+        send_handshake(tcp_handshake, tls, test_options, handshake_send).await;
 
       // We may have read/writes blocked on the handshake, so wake them all up
       read_waker_clone.wake();
@@ -168,7 +178,7 @@ impl TlsStream {
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
   ) -> Self {
-    let (tx, handshake) = watch::channel(None);
+    let handshake = Arc::new(HandshakeWatch::default());
     let read_waker = SharedWaker::default();
     let write_waker = SharedWaker::default();
     let read_waker_clone = read_waker.clone();
@@ -176,6 +186,7 @@ impl TlsStream {
     let tcp = Arc::new(tcp);
     let tcp_handshake = tcp.clone();
 
+    let handshake_send = handshake.clone();
     let handle = spawn(async move {
       let mut acceptor = Acceptor::default();
       let tls = loop {
@@ -195,7 +206,7 @@ impl TlsStream {
         tcp_handshake,
         rustls::Connection::Server(tls),
         test_options,
-        tx,
+        handshake_send,
       )
       .await;
 
@@ -402,18 +413,29 @@ impl TlsStream {
     }
   }
 
-  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+  pub fn poll_handshake(
+    &mut self,
+    cx: &mut Context,
+  ) -> Poll<io::Result<TlsHandshake>> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
-    let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
-      return Err(io::ErrorKind::NotConnected.into());
-    };
-    let handshake = handshake.as_ref().expect("Should be Some");
-    clone_result(handshake)
+    match &*self.handshake.handshake.lock().unwrap() {
+      None => {
+        // Register both wakers just in case we get split
+        self.handshake.rx_waker.register(cx.waker());
+        self.handshake.tx_waker.register(cx.waker());
+        Poll::Pending
+      }
+      Some(handshake) => Poll::Ready(clone_result(handshake)),
+    }
+  }
+
+  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+    poll_fn(|cx| self.poll_handshake(cx)).await
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
-    match &*self.handshake.borrow() {
+    match &*self.handshake.handshake.lock().unwrap() {
       None => Ok(None),
       Some(r) => clone_result(r).map(Some),
     }
@@ -573,7 +595,7 @@ async fn send_handshake(
   tcp: Arc<TcpStream>,
   tls: Connection,
   test_options: TestOptions,
-  tx: watch::Sender<Option<Result<TlsHandshake, io::Error>>>,
+  handshake: Arc<HandshakeWatch>,
 ) -> Result<HandshakeResult, io::Error> {
   #[cfg(test)]
   if test_options.delay_handshake {
@@ -596,16 +618,18 @@ async fn send_handshake(
         }
         _ => None,
       };
-      _ = tx.send(Some(Ok(TlsHandshake {
+      *handshake.handshake.lock().unwrap() = Some(Ok(TlsHandshake {
         alpn,
         sni,
         has_peer_certificates,
-      })));
+      }));
     }
     Err(err) => {
-      _ = tx.send(Some(Err(clone_error(err))));
+      *handshake.handshake.lock().unwrap() = Some(Err(clone_error(err)));
     }
   }
+  handshake.rx_waker.wake();
+  handshake.tx_waker.wake();
   res
 }
 
@@ -885,7 +909,7 @@ impl Drop for TlsStream {
 
 pub struct TlsStreamRead {
   r: tokio::io::ReadHalf<TlsStream>,
-  handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
+  handshake: Arc<HandshakeWatch>,
   tcp: Option<Arc<TcpStream>>,
 }
 
@@ -911,18 +935,27 @@ impl TlsStreamRead {
     tcp.local_addr()
   }
 
-  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+  pub fn poll_handshake(
+    &mut self,
+    cx: &mut Context,
+  ) -> Poll<io::Result<TlsHandshake>> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
-    let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
-      return Err(io::ErrorKind::NotConnected.into());
-    };
-    let handshake = handshake.as_ref().expect("Should be Some");
-    clone_result(handshake)
+    match &*self.handshake.handshake.lock().unwrap() {
+      None => {
+        self.handshake.rx_waker.register(cx.waker());
+        Poll::Pending
+      }
+      Some(handshake) => Poll::Ready(clone_result(handshake)),
+    }
+  }
+
+  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+    poll_fn(|cx| self.poll_handshake(cx)).await
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
-    match &*self.handshake.borrow() {
+    match &*self.handshake.handshake.lock().unwrap() {
       None => Ok(None),
       Some(r) => clone_result(r).map(Some),
     }
@@ -941,7 +974,7 @@ impl AsyncRead for TlsStreamRead {
 
 pub struct TlsStreamWrite {
   w: tokio::io::WriteHalf<TlsStream>,
-  handshake: watch::Receiver<Option<io::Result<TlsHandshake>>>,
+  handshake: Arc<HandshakeWatch>,
   tcp: Option<Arc<TcpStream>>,
 }
 
@@ -962,18 +995,27 @@ impl TlsStreamWrite {
     tcp.local_addr()
   }
 
-  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+  pub fn poll_handshake(
+    &mut self,
+    cx: &mut Context,
+  ) -> Poll<io::Result<TlsHandshake>> {
     // TODO(mmastrac): Handshake shouldn't need to be cloned
-    let Ok(handshake) = self.handshake.wait_for(|r| r.is_some()).await else {
-      return Err(io::ErrorKind::NotConnected.into());
-    };
-    let handshake = handshake.as_ref().expect("Should be Some");
-    clone_result(handshake)
+    match &*self.handshake.handshake.lock().unwrap() {
+      None => {
+        self.handshake.tx_waker.register(cx.waker());
+        Poll::Pending
+      }
+      Some(handshake) => Poll::Ready(clone_result(handshake)),
+    }
+  }
+
+  pub async fn handshake(&mut self) -> io::Result<TlsHandshake> {
+    poll_fn(|cx| self.poll_handshake(cx)).await
   }
 
   /// Try to get the handshake, if one exists.
   pub fn try_handshake(&self) -> io::Result<Option<TlsHandshake>> {
-    match &*self.handshake.borrow() {
+    match &*self.handshake.handshake.lock().unwrap() {
       None => Ok(None),
       Some(r) => clone_result(r).map(Some),
     }
