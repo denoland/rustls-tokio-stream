@@ -1,9 +1,10 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 mod adapter;
 mod connection_stream;
-// mod half;
 mod handshake;
 mod stream;
+
+///! An `async` wrapper around the `rustls` connection types and a `tokio` TCP socket.
 
 #[cfg(test)]
 mod system_test;

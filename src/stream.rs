@@ -95,6 +95,7 @@ pub type ServerConfigProvider = Arc<
     + Sync,
 >;
 
+/// An `async` stream that wraps a `rustls` connection and a TCP socket.
 pub struct TlsStream {
   state: TlsStreamState,
 
@@ -120,6 +121,7 @@ impl Debug for TlsStream {
   }
 }
 
+/// The handshake results from a TLS connection.
 #[derive(Clone, Debug)]
 pub struct TlsHandshake {
   pub alpn: Option<Vec<u8>>,
@@ -904,6 +906,7 @@ impl Drop for TlsStream {
   }
 }
 
+/// An `async` read half of stream that wraps a `rustls` connection and a TCP socket.
 pub struct TlsStreamRead {
   r: tokio::io::ReadHalf<TlsStream>,
   handshake: Arc<HandshakeWatch>,
@@ -969,6 +972,7 @@ impl AsyncRead for TlsStreamRead {
   }
 }
 
+/// An `async` write half of stream that wraps a `rustls` connection and a TCP socket.
 pub struct TlsStreamWrite {
   w: tokio::io::WriteHalf<TlsStream>,
   handshake: Arc<HandshakeWatch>,
