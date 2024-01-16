@@ -1,6 +1,6 @@
 [package]
 name = "rustls-tokio-stream"
-version = "0.2.19"
+version = "0.2.20"
 edition = "2021"
 description = "AsyncRead/AsyncWrite interface for RustTLS on Tokio"
 license = "MIT"
@@ -13,7 +13,7 @@ trace = []
 
 [dependencies]
 tokio = { version = "1", features = [ "io-util", "net", "rt", "sync" ] }
-rustls = "0.22"
+rustls = ">=0.21, <0.23"
 futures = "0.3"
 socket2 = "0.5"
 
