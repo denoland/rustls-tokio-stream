@@ -13,6 +13,7 @@ pub use stream::TlsHandshake;
 pub use stream::TlsStream;
 pub use stream::TlsStreamRead;
 pub use stream::TlsStreamWrite;
+pub use stream::ServerConfigProvider;
 
 /// Re-export the version of rustls we are built on
 pub use rustls;
