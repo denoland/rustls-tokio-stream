@@ -569,7 +569,7 @@ checksum = "beb461507cee2c2ff151784c52762cf4d9ff6a61f3e80968600ed24fa837fa54"
 
 [[package]]
 name = "rustls-tokio-stream"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "fastwebsockets",
  "futures",
