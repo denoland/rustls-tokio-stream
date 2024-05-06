@@ -182,8 +182,27 @@ impl TlsStream {
       tcp_handshake.readable().await?;
       read_acceptor(&tcp_handshake, &mut acceptor)?;
       if let Some(accepted) = acceptor.accept().map_err(rustls_to_io_error)? {
-        let f = server_config_provider(accepted.client_hello());
-        let config = f.await?;
+        let config = match server_config_provider(accepted.client_hello()).await
+        {
+          Ok(config) => config,
+          Err(err) => {
+            // There's no easy way to reject an acceptor, so instead we send a fatal alert manually.
+            // Wireshark packet decode:
+            //     TLSv1.2 Record Layer: Alert (Level: Fatal, Description: Close Notify)
+            //         Content Type: Alert (21)
+            //         Version: TLS 1.2 (0x0303)
+            //         Length: 2
+            //         Alert Message
+            //             Level: Fatal (2)
+            //             Description: Close Notify (0)
+            const FATAL_ALERT: &[u8] = b"\x15\x03\x03\x00\x02\x02\x00";
+            for c in FATAL_ALERT {
+              tcp_handshake.writable().await?;
+              tcp_handshake.try_write(&[*c])?;
+            }
+            return Err(err);
+          }
+        };
         let tls = accepted
           .into_connection(config)
           .map_err(rustls_to_io_error)?;
