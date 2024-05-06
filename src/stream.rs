@@ -1442,7 +1442,7 @@ pub(super) mod tests {
   #[case("b")]
   #[case("c")]
   #[tokio::test]
-  // #[ntest::timeout(60000)]
+  #[ntest::timeout(60000)]
   async fn test_client_server_alpn_acceptor(
     #[case] alpn: &'static str,
   ) -> TestResult {
