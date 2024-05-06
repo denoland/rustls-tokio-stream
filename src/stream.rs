@@ -1382,7 +1382,7 @@ pub(super) mod tests {
 
   /// Test that a flush before a handshake completes works.
   #[tokio::test]
-  // #[ntest::timeout(60000)]
+  #[ntest::timeout(60000)]
   async fn test_flush_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_pair().await;
     server.write_all(b"hello?").await.unwrap();
@@ -1480,7 +1480,7 @@ pub(super) mod tests {
 
   /// Test that the handshake fails, and we get the correct errors on both ends.
   #[tokio::test]
-  // #[ntest::timeout(60000)]
+  #[ntest::timeout(60000)]
   async fn test_client_server_alpn_mismatch() -> TestResult {
     let (mut server, mut client) =
       tls_pair_alpn(&["a"], None, &["b"], None).await;
