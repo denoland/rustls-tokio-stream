@@ -1,6 +1,8 @@
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::client::danger::ServerCertVerified;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection};
+use rustls::ClientConfig;
+use rustls::ClientConnection;
 use rustls_tokio_stream::TlsStream;
 use std::env;
 use std::sync::Arc;
