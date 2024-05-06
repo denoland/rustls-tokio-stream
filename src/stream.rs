@@ -186,7 +186,11 @@ impl TlsStream {
         {
           Ok(config) => config,
           Err(err) => {
-            // There's no easy way to reject an acceptor, so instead we send a fatal alert manually.
+            // This is a bad case. The provider was supposed to give us a config, but instead it failed.
+            //
+            // There's no easy way to reject an acceptor, and we only have an Arc for the stream so we can't close
+            // it. Instead we send a fatal alert manually which is effectively going to close the stream.
+            //
             // Wireshark packet decode:
             //     TLSv1.2 Record Layer: Alert (Level: Fatal, Description: Close Notify)
             //         Content Type: Alert (21)
