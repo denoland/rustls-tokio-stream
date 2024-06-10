@@ -180,7 +180,12 @@ impl TlsStream {
     let mut acceptor = Acceptor::default();
     let tls = loop {
       tcp_handshake.readable().await?;
-      read_acceptor(&tcp_handshake, &mut acceptor)?;
+
+      // Stop if connection was closed by client
+      if read_acceptor(&tcp_handshake, &mut acceptor)? < 1 {
+        return Err(io::ErrorKind::ConnectionReset.into());
+      }
+
       if let Some(accepted) = acceptor.accept().map_err(rustls_to_io_error)? {
         let config = match server_config_provider(accepted.client_hello()).await
         {
