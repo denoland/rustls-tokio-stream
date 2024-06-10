@@ -181,7 +181,10 @@ impl TlsStream {
     let mut acceptor = Acceptor::default();
     loop {
       tcp_handshake.readable().await?;
-      read_acceptor(tcp_handshake, &mut acceptor)?;
+      // Stop if connection was closed by client
+      if read_acceptor(&tcp_handshake, &mut acceptor)? < 1 {
+        return Err(io::ErrorKind::ConnectionReset.into());
+      }
 
       let accepted = match acceptor.accept() {
         Ok(Some(accepted)) => accepted,
