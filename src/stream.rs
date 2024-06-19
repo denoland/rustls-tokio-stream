@@ -181,36 +181,52 @@ impl TlsStream {
     let tls = loop {
       tcp_handshake.readable().await?;
       read_acceptor(&tcp_handshake, &mut acceptor)?;
-      if let Some(accepted) = acceptor.accept().map_err(rustls_to_io_error)? {
-        let config = match server_config_provider(accepted.client_hello()).await
-        {
-          Ok(config) => config,
-          Err(err) => {
-            // This is a bad case. The provider was supposed to give us a config, but instead it failed.
-            //
-            // There's no easy way to reject an acceptor, and we only have an Arc for the stream so we can't close
-            // it. Instead we send a fatal alert manually which is effectively going to close the stream.
-            //
-            // Wireshark packet decode:
-            //     TLSv1.2 Record Layer: Alert (Level: Fatal, Description: Close Notify)
-            //         Content Type: Alert (21)
-            //         Version: TLS 1.2 (0x0303)
-            //         Length: 2
-            //         Alert Message
-            //             Level: Fatal (2)
-            //             Description: Close Notify (0)
-            const FATAL_ALERT: &[u8] = b"\x15\x03\x03\x00\x02\x02\x00";
-            for c in FATAL_ALERT {
-              tcp_handshake.writable().await?;
-              tcp_handshake.try_write(&[*c])?;
+      let accept_result = acceptor.accept();
+
+      match accept_result {
+        Ok(None) => {}
+        Ok(Some(accepted)) => {
+          let config =
+            match server_config_provider(accepted.client_hello()).await {
+              Ok(config) => config,
+              Err(err) => {
+                // This is a bad case. The provider was supposed to give us a config, but instead it failed.
+                //
+                // There's no easy way to reject an acceptor, and we only have an Arc for the stream so we can't close
+                // it. Instead we send a fatal alert manually which is effectively going to close the stream.
+                //
+                // Wireshark packet decode:
+                //     TLSv1.2 Record Layer: Alert (Level: Fatal, Description: Close Notify)
+                //         Content Type: Alert (21)
+                //         Version: TLS 1.2 (0x0303)
+                //         Length: 2
+                //         Alert Message
+                //             Level: Fatal (2)
+                //             Description: Close Notify (0)
+                const FATAL_ALERT: &[u8] = b"\x15\x03\x03\x00\x02\x02\x00";
+                for c in FATAL_ALERT {
+                  tcp_handshake.writable().await?;
+                  tcp_handshake.try_write(&[*c])?;
+                }
+                return Err(err);
+              }
+            };
+          let tls_result = accepted.into_connection(config);
+          let tls = match tls_result {
+            Ok(tls) => tls,
+            Err((err, _alert)) => {
+              // TODO(bartlomieju): handle writing alerts
+              // alert.write_all(tcp_handshake)?;
+              return Err(rustls_to_io_error(err));
             }
-            return Err(err);
-          }
-        };
-        let tls = accepted
-          .into_connection(config)
-          .map_err(rustls_to_io_error)?;
-        break tls;
+          };
+          break tls;
+        }
+        Err((err, _alert)) => {
+          // TODO(bartlomieju): handle writing alerts
+          // alert.write_all(tcp_handshake)?;
+          return Err(rustls_to_io_error(err));
+        }
       }
     };
     Ok(tls)
@@ -2092,9 +2108,7 @@ pub(super) mod tests {
   #[rstest]
   #[case(true, 1024, 1024, 1024)]
   #[case(false, 1024, 1024, 1024)]
-  // Note that because we did the handshake first here, we lose a bit of buffer space due to
-  // TLS overhead on the first small write.
-  #[case(true, 1002, 16, 1024)]
+  #[case(true, 1024, 16, 1024)]
   #[case(false, 1024, 16, 1024)]
   #[case(true, 1024, 10000, 1)]
   #[case(false, 1024, 10000, 1)]
@@ -2115,6 +2129,7 @@ pub(super) mod tests {
       client.handshake().await.unwrap();
       client.flush().await.unwrap();
     }
+    eprintln!("first {} second {}", first, second);
     let n = client
       .write_vectored(&[
         IoSlice::new(&vec![1; first]),

@@ -52,6 +52,7 @@ impl ServerCertVerifier for UnsafeVerifier {
 pub async fn main() {
   #[cfg(feature = "trace")]
   rustls_tokio_stream::enable_byte_tracing();
+  rustls::crypto::ring::default_provider().install_default().unwrap();
 
   let mut args = env::args();
   _ = args.next();
