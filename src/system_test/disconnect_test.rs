@@ -31,7 +31,6 @@ fn alpn_handler(
 
 fn server_config_alpn(alpn: &[&str]) -> ServerConfig {
   let mut config = ServerConfig::builder()
-    .with_safe_defaults()
     .with_no_client_auth()
     .with_single_cert(vec![certificate()], private_key())
     .expect("Failed to build server config");
