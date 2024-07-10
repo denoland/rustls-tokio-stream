@@ -1,5 +1,6 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use crate::trace;
+use rustls::server::AcceptedAlert;
 use rustls::server::Acceptor;
 use rustls::Connection;
 use std::io;
@@ -106,4 +107,12 @@ pub fn read_acceptor(
 ) -> io::Result<usize> {
   let mut read = ImplementReadTrait(tcp);
   acceptor.read_tls(&mut read)
+}
+
+pub fn write_acceptor_alert(
+  tcp: &TcpStream,
+  mut alert: AcceptedAlert,
+) -> io::Result<()> {
+  let mut write = ImplementWriteTrait(tcp);
+  alert.write_all(&mut write)
 }
