@@ -104,6 +104,10 @@ impl ConnectionStream {
     (Arc::try_unwrap(self.tcp).unwrap(), self.tls)
   }
 
+  pub fn connection(&self) -> &Connection {
+    &self.tls
+  }
+
   pub(crate) fn tcp_stream(&self) -> &Arc<TcpStream> {
     &self.tcp
   }
