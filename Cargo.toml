@@ -12,13 +12,18 @@ default = []
 trace = []
 
 [dependencies]
-tokio = { version = "1", features = [ "io-util", "net", "rt", "sync" ] }
-rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+# io-util for stream splitting, net for TcpStream, rt for tasks, 
+tokio = { version = "1", default-features = false, features = ["io-util", "net", "rt"] }
+# std feature is required for error conversion
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+# AtomicWaker and FutureExt
 futures = "0.3"
+# SockRef
 socket2 = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = [ "full" ] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
 rustls-pemfile = "2.0.0"
 ntest = "0.9"
 rstest = "0.18"
