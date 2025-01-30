@@ -469,6 +469,14 @@ impl TlsStream {
     (read, write)
   }
 
+  /// If the stream is open, returns the underlying rustls connection.
+  pub fn connection(&self) -> Option<&rustls::Connection> {
+    match &self.state {
+      TlsStreamState::Open(stm) => Some(stm.connection()),
+      _ => None,
+    }
+  }
+
   pub async fn into_inner(mut self) -> io::Result<(TcpStream, Connection)> {
     poll_fn(|cx| self.poll_pending_handshake(cx)).await?;
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
@@ -525,6 +533,9 @@ impl TlsStream {
     &mut self,
     cx: &mut Context,
   ) -> Poll<io::Result<TlsHandshake>> {
+    // Transition to the open state if necessary
+    ready!(self.poll_pending_handshake(cx)?);
+
     // TODO(mmastrac): Handshake shouldn't need to be cloned
     match &*self.handshake.handshake.lock().unwrap() {
       None => {
@@ -1681,6 +1692,25 @@ pub(super) mod tests {
     });
     a.await?;
     b.await?;
+
+    Ok(())
+  }
+
+  /// Test that the handshake fails, and we get the correct errors on both ends.
+  #[tokio::test]
+  #[ntest::timeout(60000)]
+  async fn test_client_server_raw_connection() -> TestResult {
+    let (mut server, mut client) =
+      tls_pair_alpn(&["a"], None, &["a"], None).await;
+
+    assert!(server.connection().is_none());
+    assert!(client.connection().is_none());
+
+    server.handshake().await?;
+    client.handshake().await?;
+
+    assert!(server.connection().is_some());
+    assert!(client.connection().is_some());
 
     Ok(())
   }
