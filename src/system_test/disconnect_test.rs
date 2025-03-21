@@ -4,13 +4,13 @@ use crate::TlsStream;
 use rustls::server::ClientHello;
 use rustls::ServerConfig;
 use std::io;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpSocket;
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 use tokio::spawn;
 
 fn alpn_handler(
@@ -79,7 +79,7 @@ async fn disconnect_test() {
     Arc::new(move |client_hello| {
       Box::pin(make_config(alpn_handler(client_hello)))
     }),
-    None
+    None,
   );
 
   // At this point, the acceptor is in an infinite loop, to test if it's really so, try to connect another client.
@@ -90,7 +90,9 @@ async fn disconnect_test() {
       .connect(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)))
       .await
       .unwrap()
-  }).await.unwrap();
+  })
+  .await
+  .unwrap();
 
   listener.accept().await.unwrap().0; // The test should be stuck now if the bug is still active
 }
