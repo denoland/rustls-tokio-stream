@@ -3,8 +3,8 @@ use rustls::Connection;
 use rustls::IoState;
 use socket2::SockRef;
 use std::io;
+use std::io::BufRead;
 use std::io::ErrorKind;
-use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
 use std::task::ready;
@@ -201,50 +201,70 @@ impl ConnectionStream {
     }
   }
 
-  /// Perform a read operation on this connection.
+  /// Perform a read operation on this connection. Read as much as possible into
+  /// the buffer.
   fn try_read(&mut self, buf: &mut ReadBuf<'_>) -> io::Result<usize> {
-    // SAFETY: We're going to fill this buffer and mark it as filled according to how much we actually read
-    let buf_slice =
-      unsafe { &mut *(buf.unfilled_mut() as *mut [_] as *mut [u8]) };
-
-    match self.tls.reader().read(buf_slice) {
-      Ok(n) if n == 0 => {
-        trace!("r*={n}");
-        // EOF
-        Ok(0)
+    let mut reader = self.tls.reader();
+    let mut read = 0;
+    loop {
+      let remaining = buf.remaining();
+      if remaining == 0 {
+        break Ok(read);
       }
-      Ok(n) => {
-        trace!("r*={n}");
-        // SAFETY: We know we read this much into the buffer
-        unsafe { buf.assume_init(n) };
-        buf.advance(n);
-        Ok(n)
-      }
-      // One of the two errors that reader().read can return: this is not associated with the non-blocking
-      // errors on the underlying TCP stream, it just means we have no data available.
-      Err(err) if err.kind() == ErrorKind::WouldBlock => {
-        trace!("r*={err:?}");
-        // No data to read, but we need to make sure we don't have an error state here.
-        if let Some(err) = &self.rd_proto_error {
-          Err(rustls_to_io_error(err.clone()))
-        } else if let Some(err) = self.rd_error {
-          // We have a connection error
-          Err(err.into())
-        } else {
-          // No error, just don't have data
+      let chunk = reader.fill_buf();
+      break match chunk {
+        Ok(n) if n.is_empty() => {
+          trace!("r*=0");
+          Ok(read)
+        }
+        Ok(n) => {
+          let len = n.len();
+          trace!("r*={}", len);
+          if remaining >= len {
+            buf.put_slice(n);
+            reader.consume(len);
+            read += len;
+          } else {
+            buf.put_slice(&n[..remaining]);
+            reader.consume(remaining);
+            read += remaining;
+          }
+          continue;
+        }
+        // One of the two errors that reader().read can return: this is not associated with the non-blocking
+        // errors on the underlying TCP stream, it just means we have no data available.
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+          // If we read some data, we can return it
+          if read != 0 {
+            break Ok(read);
+          }
+          trace!("r*={err:?}");
+          // No data to read, but we need to make sure we don't have an error state here.
+          if let Some(err) = &self.rd_proto_error {
+            Err(rustls_to_io_error(err.clone()))
+          } else if let Some(err) = self.rd_error {
+            // We have a connection error
+            Err(err.into())
+          } else {
+            // No error, just don't have data
+            Err(err)
+          }
+        }
+        // This is the only other error that reader().read method can legitimately return, and it happens if the other
+        // side fails to close the connection cleanly.
+        Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+          trace!("r*={err:?}");
+          self.rd_error = Some(ErrorKind::UnexpectedEof);
+          // If we read some data, we can return it and handle the error later
+          if read != 0 {
+            break Ok(read);
+          }
           Err(err)
         }
-      }
-      // This is the only other error that reader().read method can legitimately return, and it happens if the other
-      // side fails to close the connection cleanly.
-      Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-        trace!("r*={err:?}");
-        self.rd_error = Some(ErrorKind::UnexpectedEof);
-        Err(err)
-      }
-      Err(_) => {
-        // rustls will not return other errors here
-        unreachable!()
+        Err(_) => {
+          // rustls will not return other errors here
+          unreachable!()
+        }
       }
     }
   }

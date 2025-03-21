@@ -23,7 +23,7 @@ socket2 = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = [ "full" ] }
-rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+rustls = { version = "0.23.25", default-features = false, features = ["logging", "std", "tls12", "ring"] }
 rustls-pemfile = "2.0.0"
 ntest = "0.9"
 rstest = "0.18"
