@@ -477,6 +477,15 @@ impl TlsStream {
     }
   }
 
+  /// If the stream is open or handshaking, returns the underlying TCP stream.
+  pub fn tcp_stream(&self) -> Option<&TcpStream> {
+    match &self.state {
+      TlsStreamState::Open(stm) => Some(&stm.tcp_stream()),
+      TlsStreamState::Handshaking { tcp, .. } => Some(tcp),
+      _ => None,
+    }
+  }
+
   pub async fn into_inner(mut self) -> io::Result<(TcpStream, Connection)> {
     poll_fn(|cx| self.poll_pending_handshake(cx)).await?;
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
