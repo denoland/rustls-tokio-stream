@@ -265,7 +265,7 @@ impl ConnectionStream {
           // rustls will not return other errors here
           unreachable!()
         }
-      }
+      };
     }
   }
 
@@ -283,6 +283,9 @@ impl ConnectionStream {
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
   ) -> Poll<io::Result<usize>> {
+    #[cfg(debug_assertions)]
+    let initial_len = buf.filled().len();
+
     let res = loop {
       // First prepare to read
       let read = self.poll_read_only(PollContext::Explicit(cx));
@@ -311,6 +314,18 @@ impl ConnectionStream {
         }
       }
     };
+
+    #[cfg(debug_assertions)]
+    {
+      // Sanity check that we always return the correct number of bytes read
+      if let Poll::Ready(Ok(n)) = &res {
+        let actually_read = buf.filled().len() - initial_len;
+        assert!(
+          actually_read == *n,
+          "reported {n} bytes read, but only {actually_read} bytes were read"
+        );
+      }
+    }
 
     if res.is_ready() {
       self.rd_waker.take();
