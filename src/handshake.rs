@@ -4,11 +4,10 @@ use std::io;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
-
 use crate::adapter::read_tls;
 use crate::adapter::rustls_to_io_error;
 use crate::adapter::write_tls;
+use crate::stream::UnderlyingStream;
 use crate::trace;
 use crate::TestOptions;
 
@@ -21,7 +20,10 @@ fn trace_result<T>(result: io::Result<T>) -> io::Result<T> {
   result
 }
 
-fn try_read(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
+fn try_read<S: UnderlyingStream>(
+  tcp: &S,
+  tls: &mut Connection,
+) -> io::Result<()> {
   match read_tls(tcp, tls) {
     Ok(0) => {
       // EOF during handshake
@@ -40,7 +42,10 @@ fn try_read(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
   Ok(())
 }
 
-fn try_write(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
+fn try_write<S: UnderlyingStream>(
+  tcp: &S,
+  tls: &mut Connection,
+) -> io::Result<()> {
   match write_tls(tcp, tls) {
     Ok(_) => {}
     Err(err) if err.kind() == ErrorKind::WouldBlock => {
@@ -54,11 +59,11 @@ fn try_write(tcp: &TcpStream, tls: &mut Connection) -> io::Result<()> {
 }
 
 #[derive(Debug)]
-pub(crate) struct HandshakeResult(Arc<TcpStream>, pub Connection);
+pub(crate) struct HandshakeResult<S: UnderlyingStream>(Arc<S>, pub Connection);
 
-impl HandshakeResult {
+impl<S: UnderlyingStream> HandshakeResult<S> {
   #[cfg(test)]
-  pub fn reclaim(self) -> (TcpStream, Connection) {
+  pub fn reclaim(self) -> (S, Connection) {
     (
       Arc::into_inner(self.0).expect("Failed to reclaim TCP"),
       self.1,
@@ -67,7 +72,7 @@ impl HandshakeResult {
 
   // TODO(mmastrac): if we split ConnectionStream we can remove the Arc and use reclaim2
   #[allow(unused)]
-  pub fn reclaim2(self, tcp: Arc<TcpStream>) -> (TcpStream, Connection) {
+  pub fn reclaim2(self, tcp: Arc<S>) -> (S, Connection) {
     drop(tcp);
     (
       Arc::into_inner(self.0).expect("Failed to reclaim TCP"),
@@ -75,17 +80,17 @@ impl HandshakeResult {
     )
   }
 
-  pub fn into_inner(self) -> (Arc<TcpStream>, Connection) {
+  pub fn into_inner(self) -> (Arc<S>, Connection) {
     (self.0, self.1)
   }
 }
 
 /// Performs a handshake and returns the [`TcpStream`]/[`Connection`] pair if successful.
-pub(crate) async fn handshake_task(
-  tcp: Arc<TcpStream>,
+pub(crate) async fn handshake_task<S: UnderlyingStream>(
+  tcp: Arc<S>,
   tls: Connection,
   test_options: TestOptions,
-) -> io::Result<HandshakeResult> {
+) -> io::Result<HandshakeResult<S>> {
   let res = handshake_task_internal(tcp, tls, test_options).await;
   // Ensure consistency in handshake errors
   match res {
@@ -101,11 +106,11 @@ pub(crate) async fn handshake_task(
   }
 }
 
-async fn handshake_task_internal(
-  tcp: Arc<TcpStream>,
+async fn handshake_task_internal<S: UnderlyingStream>(
+  tcp: Arc<S>,
   mut tls: Connection,
   test_options: TestOptions,
-) -> io::Result<HandshakeResult> {
+) -> io::Result<HandshakeResult<S>> {
   #[cfg(not(test))]
   {
     _ = test_options;
@@ -124,7 +129,7 @@ async fn handshake_task_internal(
       if test_options.slow_handshake_write {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      match try_write(&tcp, &mut tls) {
+      match try_write(&*tcp, &mut tls) {
         Ok(()) => {}
         Err(err) => {
           struct WriteSink();
@@ -170,7 +175,7 @@ async fn handshake_task_internal(
       if test_options.slow_handshake_read {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
       }
-      match try_read(&tcp, &mut tls) {
+      match try_read(&*tcp, &mut tls) {
         Ok(_) => {}
         Err(err) => {
           trace!("read error {err:?}, starting last gasp write");
@@ -178,7 +183,7 @@ async fn handshake_task_internal(
           // same way that the rustls Connection::complete_io() method would.
           while tls.wants_write() {
             trace_result(tcp.writable().await)?;
-            match try_write(&tcp, &mut tls) {
+            match try_write(&*tcp, &mut tls) {
               Err(err) if err.kind() == ErrorKind::WouldBlock => {
                 // Spurious wakeup
                 continue;
