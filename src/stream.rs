@@ -20,6 +20,7 @@ use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
 use socket2::SockRef;
+use std::any::Any;
 use std::fmt::Debug;
 use std::future::poll_fn;
 use std::future::Future;
@@ -122,7 +123,7 @@ enum TlsStreamState<S: UnderlyingStream> {
     handle: JoinHandle<io::Result<HandshakeResult<S>>>,
     wakers: DeferredWakers,
     write_buf: Vec<u8>,
-    tcp: Arc<S>,
+    underlying: Arc<S>,
   },
   /// The connection is open.
   Open(ConnectionStream<S>),
@@ -142,6 +143,7 @@ pub type ServerConfigProvider = Arc<
 >;
 
 pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
+  type StdType: Send;
   fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
   fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
   fn try_read(&self, buf: &mut [u8]) -> io::Result<usize>;
@@ -151,34 +153,90 @@ pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
 
   fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()>;
 
-  fn into_std(self) -> Option<std::io::Result<std::net::TcpStream>> {
+  fn into_std(self) -> Option<std::io::Result<Self::StdType>> {
     None
+  }
+
+  fn downcast<S: UnderlyingStream>(self) -> Result<S, Self> {
+    let mut holder = Some(self);
+    let stream = &mut holder as &mut dyn Any;
+    if let Some(stream) = stream.downcast_mut::<Option<S>>() {
+      Ok(stream.take().unwrap())
+    } else {
+      Err(holder.take().unwrap())
+    }
   }
 }
 
 impl UnderlyingStream for TcpStream {
+  type StdType = std::net::TcpStream;
+  #[inline(always)]
   fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self.poll_read_ready(cx)
   }
+  #[inline(always)]
   fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self.poll_write_ready(cx)
   }
+  #[inline(always)]
   fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
     self.try_read(buf)
   }
+  #[inline(always)]
   fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
     self.try_write(buf)
   }
+  #[inline(always)]
   fn readable(&self) -> impl Future<Output = io::Result<()>> + Send {
     self.readable()
   }
+  #[inline(always)]
   fn writable(&self) -> impl Future<Output = io::Result<()>> + Send {
     self.writable()
   }
+  #[inline(always)]
   fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
     SockRef::from(&self).shutdown(how)
   }
+  #[inline(always)]
   fn into_std(self) -> Option<std::io::Result<std::net::TcpStream>> {
+    Some(self.into_std())
+  }
+}
+
+#[cfg(unix)]
+impl UnderlyingStream for tokio::net::UnixStream {
+  type StdType = std::os::unix::net::UnixStream;
+  #[inline(always)]
+  fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    self.poll_read_ready(cx)
+  }
+  #[inline(always)]
+  fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    self.poll_write_ready(cx)
+  }
+  #[inline(always)]
+  fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+    self.try_read(buf)
+  }
+  #[inline(always)]
+  fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+    self.try_write(buf)
+  }
+  #[inline(always)]
+  fn readable(&self) -> impl Future<Output = io::Result<()>> + Send {
+    self.readable()
+  }
+  #[inline(always)]
+  fn writable(&self) -> impl Future<Output = io::Result<()>> + Send {
+    self.writable()
+  }
+  #[inline(always)]
+  fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+    SockRef::from(&self).shutdown(how)
+  }
+  #[inline(always)]
+  fn into_std(self) -> Option<std::io::Result<std::os::unix::net::UnixStream>> {
     Some(self.into_std())
   }
 }
@@ -222,8 +280,10 @@ pub struct TlsHandshake {
 impl TlsStream<TcpStream> {
   pub fn linger(&self) -> Result<Option<Duration>, io::Error> {
     match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().linger(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.linger(),
+      TlsStreamState::Open(stm) => stm.underlying_stream().linger(),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.linger(),
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         Err(std::io::ErrorKind::NotConnected.into())
       }
@@ -232,8 +292,10 @@ impl TlsStream<TcpStream> {
 
   pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
     match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.set_linger(dur),
+      TlsStreamState::Open(stm) => stm.underlying_stream().set_linger(dur),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.set_linger(dur),
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         Err(std::io::ErrorKind::NotConnected.into())
       }
@@ -243,8 +305,10 @@ impl TlsStream<TcpStream> {
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().peer_addr(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.peer_addr(),
+      TlsStreamState::Open(stm) => stm.underlying_stream().peer_addr(),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.peer_addr(),
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         Err(std::io::ErrorKind::NotConnected.into())
       }
@@ -254,8 +318,37 @@ impl TlsStream<TcpStream> {
   /// Returns the local address of this socket.
   pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().local_addr(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.local_addr(),
+      TlsStreamState::Open(stm) => stm.underlying_stream().local_addr(),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.local_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+}
+
+#[cfg(unix)]
+impl TlsStream<tokio::net::UnixStream> {
+  pub fn peer_addr(&self) -> Result<tokio::net::unix::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.underlying_stream().peer_addr(),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.peer_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
+  pub fn local_addr(&self) -> Result<tokio::net::unix::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.underlying_stream().local_addr(),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => tcp.local_addr(),
       TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
         Err(std::io::ErrorKind::NotConnected.into())
       }
@@ -294,7 +387,7 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
         handle,
         wakers,
         write_buf: vec![],
-        tcp,
+        underlying: tcp,
       },
       handshake,
       buffer_size,
@@ -397,7 +490,7 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
         handle,
         wakers,
         write_buf: vec![],
-        tcp,
+        underlying: tcp,
       },
       handshake,
       buffer_size,
@@ -538,8 +631,10 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
     let handshake1 = self.handshake.clone();
     let handshake2 = self.handshake.clone();
     let tcp = match &self.state {
-      TlsStreamState::Handshaking { tcp, .. } => Some(tcp.clone()),
-      TlsStreamState::Open(conn) => Some(conn.tcp_stream().clone()),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => Some(tcp.clone()),
+      TlsStreamState::Open(conn) => Some(conn.underlying_stream().clone()),
       _ => None,
     };
     let (r, w) = tokio::io::split(self);
@@ -560,15 +655,6 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
   pub fn connection(&self) -> Option<&rustls::Connection> {
     match &self.state {
       TlsStreamState::Open(stm) => Some(stm.connection()),
-      _ => None,
-    }
-  }
-
-  /// If the stream is open or handshaking, returns the underlying TCP stream.
-  pub fn tcp_stream(&self) -> Option<&TcpStream> {
-    match &self.state {
-      TlsStreamState::Open(stm) => Some(&stm.tcp_stream()),
-      TlsStreamState::Handshaking { tcp, .. } => Some(tcp),
       _ => None,
     }
   }
@@ -760,6 +846,19 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
   }
 }
 
+impl<S: UnderlyingStream> TlsStream<S> {
+  /// If the stream is open or handshaking, returns the underlying TCP stream.
+  pub fn underlying_stream(&self) -> Option<&S> {
+    match &self.state {
+      TlsStreamState::Open(stm) => Some(stm.underlying_stream()),
+      TlsStreamState::Handshaking {
+        underlying: tcp, ..
+      } => Some(tcp),
+      _ => None,
+    }
+  }
+}
+
 async fn send_handshake<S: UnderlyingStream>(
   tcp: Arc<S>,
   tls: Result<Connection, io::Error>,
@@ -820,20 +919,20 @@ async fn send_handshake<S: UnderlyingStream>(
 fn nonblocking_tcp_drop<S: UnderlyingStream>(stm: ConnectionStream<S>) {
   // TODO(mmastrac) A better fix would be detecting that the server has sent at least one post-handshake packet,
   // which would indicate that it's safe to close at this point.
-  let (tcp, tls) = stm.into_inner();
+  let (inner, tls) = stm.into_inner();
   if matches!(tls, Connection::Client(_))
     && tls.protocol_version() == Some(TLS13.version)
   {
-    if let Some(Ok(tcp)) = tcp.into_std() {
-      spawn_blocking(move || {
-        trace!("in drop tcp task");
-        sleep(Duration::from_millis(100));
-        drop(tcp);
-        trace!("done drop tcp task");
-      });
+    if let Ok(tcp) = inner.downcast::<TcpStream>() {
+      if let Ok(tcp) = tcp.into_std() {
+        spawn_blocking(move || {
+          trace!("in drop tcp task");
+          sleep(Duration::from_millis(100));
+          drop(tcp);
+          trace!("done drop tcp task");
+        });
+      }
     }
-  } else {
-    drop(tcp);
   }
 }
 
@@ -1040,7 +1139,7 @@ impl<S: UnderlyingStream> Drop for TlsStream<S> {
       TlsStreamState::Handshaking {
         handle,
         write_buf,
-        tcp,
+        underlying: tcp,
         ..
       } => {
         spawn(async move {

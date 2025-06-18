@@ -1,5 +1,5 @@
-use crate::stream::UnderlyingStream;
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
+use crate::stream::UnderlyingStream;
 use crate::trace;
 use rustls::server::AcceptedAlert;
 use rustls::server::Acceptor;

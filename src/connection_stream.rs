@@ -107,7 +107,7 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
     &self.tls
   }
 
-  pub(crate) fn tcp_stream(&self) -> &Arc<S> {
+  pub(crate) fn underlying_stream(&self) -> &Arc<S> {
     &self.tcp
   }
 
