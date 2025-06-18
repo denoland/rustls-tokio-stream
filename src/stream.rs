@@ -19,6 +19,7 @@ use rustls::ClientConnection;
 use rustls::Connection;
 use rustls::ServerConfig;
 use rustls::ServerConnection;
+use socket2::SockRef;
 use std::fmt::Debug;
 use std::future::poll_fn;
 use std::future::Future;
@@ -114,17 +115,17 @@ struct HandshakeWatch {
   tx_waker: AtomicWaker,
 }
 
-enum TlsStreamState {
+enum TlsStreamState<S: UnderlyingStream> {
   /// If we are handshaking, writes are buffered and reads block.
   // TODO(mmastrac): We should be buffered in the Connection, not the Vec, as this results in a double-copy.
   Handshaking {
-    handle: JoinHandle<io::Result<HandshakeResult>>,
+    handle: JoinHandle<io::Result<HandshakeResult<S>>>,
     wakers: DeferredWakers,
     write_buf: Vec<u8>,
-    tcp: Arc<TcpStream>,
+    tcp: Arc<S>,
   },
   /// The connection is open.
-  Open(ConnectionStream),
+  Open(ConnectionStream<S>),
   /// The connection is closed.
   Closed,
   /// The connection is closed because of an error.
@@ -140,15 +141,57 @@ pub type ServerConfigProvider = Arc<
     + Sync,
 >;
 
+pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
+  fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+  fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+  fn try_read(&self, buf: &mut [u8]) -> io::Result<usize>;
+  fn try_write(&self, buf: &[u8]) -> io::Result<usize>;
+  fn readable(&self) -> impl Future<Output = io::Result<()>> + Send;
+  fn writable(&self) -> impl Future<Output = io::Result<()>> + Send;
+
+  fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()>;
+
+  fn into_std(self) -> Option<std::io::Result<std::net::TcpStream>> {
+    None
+  }
+}
+
+impl UnderlyingStream for TcpStream {
+  fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    self.poll_read_ready(cx)
+  }
+  fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    self.poll_write_ready(cx)
+  }
+  fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+    self.try_read(buf)
+  }
+  fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+    self.try_write(buf)
+  }
+  fn readable(&self) -> impl Future<Output = io::Result<()>> + Send {
+    self.readable()
+  }
+  fn writable(&self) -> impl Future<Output = io::Result<()>> + Send {
+    self.writable()
+  }
+  fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+    SockRef::from(&self).shutdown(how)
+  }
+  fn into_std(self) -> Option<std::io::Result<std::net::TcpStream>> {
+    Some(self.into_std())
+  }
+}
+
 /// An `async` stream that wraps a `rustls` connection and a TCP socket.
-pub struct TlsStream {
-  state: TlsStreamState,
+pub struct TlsStream<S: UnderlyingStream> {
+  state: TlsStreamState<S>,
 
   handshake: Arc<HandshakeWatch>,
   buffer_size: Option<NonZeroUsize>,
 }
 
-impl Debug for TlsStream {
+impl<S: UnderlyingStream> Debug for TlsStream<S> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match &self.state {
       TlsStreamState::Handshaking { .. } => {
@@ -176,9 +219,53 @@ pub struct TlsHandshake {
   pub has_peer_certificates: bool,
 }
 
-impl TlsStream {
+impl TlsStream<TcpStream> {
+  pub fn linger(&self) -> Result<Option<Duration>, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().linger(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.linger(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
+  pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.set_linger(dur),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
+  /// Returns the peer address of this socket.
+  pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().peer_addr(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.peer_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+
+  /// Returns the local address of this socket.
+  pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
+    match &self.state {
+      TlsStreamState::Open(stm) => stm.tcp_stream().local_addr(),
+      TlsStreamState::Handshaking { tcp, .. } => tcp.local_addr(),
+      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
+        Err(std::io::ErrorKind::NotConnected.into())
+      }
+    }
+  }
+}
+
+impl<S: UnderlyingStream + 'static> TlsStream<S> {
   fn new(
-    tcp: TcpStream,
+    tcp: S,
     mut tls: Connection,
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
@@ -216,13 +303,13 @@ impl TlsStream {
 
   async fn accept(
     mut acceptor: Acceptor,
-    tcp_handshake: &TcpStream,
+    tcp_handshake: &S,
     server_config_provider: ServerConfigProvider,
   ) -> Result<ServerConnection, io::Error> {
     loop {
       tcp_handshake.readable().await?;
       // Stop if connection was closed by client
-      if read_acceptor(&tcp_handshake, &mut acceptor)? < 1 {
+      if read_acceptor(tcp_handshake, &mut acceptor)? < 1 {
         return Err(io::ErrorKind::ConnectionReset.into());
       }
 
@@ -275,7 +362,7 @@ impl TlsStream {
 
   fn new_server_acceptor(
     acceptor: Acceptor,
-    tcp: TcpStream,
+    tcp: S,
     server_config_provider: ServerConfigProvider,
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
@@ -318,7 +405,7 @@ impl TlsStream {
   }
 
   pub fn new_client_side(
-    tcp: TcpStream,
+    tcp: S,
     tls: ClientConnection,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -332,7 +419,7 @@ impl TlsStream {
 
   #[cfg(test)]
   pub(crate) fn new_client_side_test_options(
-    tcp: TcpStream,
+    tcp: S,
     tls_config: Arc<rustls::ClientConfig>,
     server_name: rustls::pki_types::ServerName<'_>,
     buffer_size: Option<NonZeroUsize>,
@@ -344,7 +431,7 @@ impl TlsStream {
   }
 
   pub fn new_client_side_from(
-    tcp: TcpStream,
+    tcp: S,
     connection: ClientConnection,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -358,7 +445,7 @@ impl TlsStream {
 
   #[cfg(test)]
   pub(crate) fn new_server_side_test_options(
-    tcp: TcpStream,
+    tcp: S,
     tls_config: Arc<ServerConfig>,
     buffer_size: Option<NonZeroUsize>,
     test_options: TestOptions,
@@ -368,7 +455,7 @@ impl TlsStream {
   }
 
   pub fn new_server_side(
-    tcp: TcpStream,
+    tcp: S,
     tls_config: Arc<ServerConfig>,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -385,7 +472,7 @@ impl TlsStream {
   /// based on the [`ClientHello`] message. This may be used to provide a different server
   /// certificate or ALPN configuration depending on the requested hostname.
   pub fn new_server_side_acceptor(
-    tcp: TcpStream,
+    tcp: S,
     server_config_provider: ServerConfigProvider,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -406,7 +493,7 @@ impl TlsStream {
   /// way, perhaps stuffed with prefix bytes or a full handshake to emulate.
   pub fn new_server_side_from_acceptor(
     acceptor: Acceptor,
-    tcp: TcpStream,
+    tcp: S,
     server_config_provider: ServerConfigProvider,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -420,7 +507,7 @@ impl TlsStream {
   }
 
   pub fn new_server_side_from(
-    tcp: TcpStream,
+    tcp: S,
     connection: ServerConnection,
     buffer_size: Option<NonZeroUsize>,
   ) -> Self {
@@ -433,7 +520,7 @@ impl TlsStream {
   }
 
   /// Attempt to retrieve the inner stream and connection.
-  pub fn try_into_inner(mut self) -> Result<(TcpStream, Connection), Self> {
+  pub fn try_into_inner(mut self) -> Result<(S, Connection), Self> {
     match self.state {
       TlsStreamState::Open(_) => {
         let TlsStreamState::Open(stm) =
@@ -447,7 +534,7 @@ impl TlsStream {
     }
   }
 
-  pub fn into_split(self) -> (TlsStreamRead, TlsStreamWrite) {
+  pub fn into_split(self) -> (TlsStreamRead<S>, TlsStreamWrite<S>) {
     let handshake1 = self.handshake.clone();
     let handshake2 = self.handshake.clone();
     let tcp = match &self.state {
@@ -486,55 +573,13 @@ impl TlsStream {
     }
   }
 
-  pub async fn into_inner(mut self) -> io::Result<(TcpStream, Connection)> {
+  pub async fn into_inner(mut self) -> io::Result<(S, Connection)> {
     poll_fn(|cx| self.poll_pending_handshake(cx)).await?;
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
       TlsStreamState::Open(stm) => Ok(stm.into_inner()),
       TlsStreamState::Closed => Err(ErrorKind::NotConnected.into()),
       TlsStreamState::ClosedError(err) => Err(err),
       TlsStreamState::Handshaking { .. } => unreachable!(),
-    }
-  }
-
-  pub fn linger(&self) -> Result<Option<Duration>, io::Error> {
-    match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().linger(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.linger(),
-      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        Err(std::io::ErrorKind::NotConnected.into())
-      }
-    }
-  }
-
-  pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), io::Error> {
-    match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().set_linger(dur),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.set_linger(dur),
-      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        Err(std::io::ErrorKind::NotConnected.into())
-      }
-    }
-  }
-
-  /// Returns the peer address of this socket.
-  pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
-    match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().peer_addr(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.peer_addr(),
-      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        Err(std::io::ErrorKind::NotConnected.into())
-      }
-    }
-  }
-
-  /// Returns the local address of this socket.
-  pub fn local_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
-    match &self.state {
-      TlsStreamState::Open(stm) => stm.tcp_stream().local_addr(),
-      TlsStreamState::Handshaking { tcp, .. } => tcp.local_addr(),
-      TlsStreamState::Closed | TlsStreamState::ClosedError(_) => {
-        Err(std::io::ErrorKind::NotConnected.into())
-      }
     }
   }
 
@@ -571,7 +616,7 @@ impl TlsStream {
 
   fn finalize_handshake(
     &mut self,
-    join_result: Result<io::Result<HandshakeResult>, JoinError>,
+    join_result: Result<io::Result<HandshakeResult<S>>, JoinError>,
   ) -> io::Result<()> {
     trace!("finalize handshake");
     match std::mem::replace(&mut self.state, TlsStreamState::Closed) {
@@ -715,12 +760,12 @@ impl TlsStream {
   }
 }
 
-async fn send_handshake(
-  tcp: Arc<TcpStream>,
+async fn send_handshake<S: UnderlyingStream>(
+  tcp: Arc<S>,
   tls: Result<Connection, io::Error>,
   test_options: TestOptions,
   handshake: Arc<HandshakeWatch>,
-) -> Result<HandshakeResult, io::Error> {
+) -> Result<HandshakeResult<S>, io::Error> {
   let tls = match tls {
     Ok(tls) => tls,
     Err(err) => {
@@ -772,14 +817,14 @@ async fn send_handshake(
 /// send the final part of its handshake to the client's closed socket, which yields a TCP
 /// reset and then causes the server to throw away its received buffer. This holds a TCP
 /// socket open for a shortly extended period of time if we have a TLS 1.3 client.
-fn nonblocking_tcp_drop(stm: ConnectionStream) {
+fn nonblocking_tcp_drop<S: UnderlyingStream>(stm: ConnectionStream<S>) {
   // TODO(mmastrac) A better fix would be detecting that the server has sent at least one post-handshake packet,
   // which would indicate that it's safe to close at this point.
   let (tcp, tls) = stm.into_inner();
   if matches!(tls, Connection::Client(_))
     && tls.protocol_version() == Some(TLS13.version)
   {
-    if let Ok(tcp) = tcp.into_std() {
+    if let Some(Ok(tcp)) = tcp.into_std() {
       spawn_blocking(move || {
         trace!("in drop tcp task");
         sleep(Duration::from_millis(100));
@@ -792,7 +837,7 @@ fn nonblocking_tcp_drop(stm: ConnectionStream) {
   }
 }
 
-impl AsyncRead for TlsStream {
+impl<S: UnderlyingStream> AsyncRead for TlsStream<S> {
   fn poll_read(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -830,7 +875,7 @@ impl AsyncRead for TlsStream {
   }
 }
 
-impl AsyncWrite for TlsStream {
+impl<S: UnderlyingStream> AsyncWrite for TlsStream<S> {
   fn poll_write(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -987,7 +1032,7 @@ impl AsyncWrite for TlsStream {
   }
 }
 
-impl Drop for TlsStream {
+impl<S: UnderlyingStream> Drop for TlsStream<S> {
   fn drop(&mut self) {
     trace!("dropping {self:?}");
     let state = std::mem::replace(&mut self.state, TlsStreamState::Closed);
@@ -1038,18 +1083,13 @@ impl Drop for TlsStream {
 }
 
 /// An `async` read half of stream that wraps a `rustls` connection and a TCP socket.
-pub struct TlsStreamRead {
-  r: tokio::io::ReadHalf<TlsStream>,
+pub struct TlsStreamRead<S: UnderlyingStream> {
+  r: tokio::io::ReadHalf<TlsStream<S>>,
   handshake: Arc<HandshakeWatch>,
-  tcp: Option<Arc<TcpStream>>,
+  tcp: Option<Arc<S>>,
 }
 
-impl TlsStreamRead {
-  /// Reunites with a previously split `TlsStreamWrite`.
-  pub fn unsplit(self, other: TlsStreamWrite) -> TlsStream {
-    self.r.unsplit(other.w)
-  }
-
+impl TlsStreamRead<TcpStream> {
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     let Some(tcp) = &self.tcp else {
@@ -1064,6 +1104,13 @@ impl TlsStreamRead {
       return Err(std::io::ErrorKind::NotConnected.into());
     };
     tcp.local_addr()
+  }
+}
+
+impl<S: UnderlyingStream> TlsStreamRead<S> {
+  /// Reunites with a previously split `TlsStreamWrite`.
+  pub fn unsplit(self, other: TlsStreamWrite<S>) -> TlsStream<S> {
+    self.r.unsplit(other.w)
   }
 
   pub fn poll_handshake(
@@ -1093,7 +1140,7 @@ impl TlsStreamRead {
   }
 }
 
-impl AsyncRead for TlsStreamRead {
+impl<S: UnderlyingStream> AsyncRead for TlsStreamRead<S> {
   fn poll_read(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -1104,13 +1151,13 @@ impl AsyncRead for TlsStreamRead {
 }
 
 /// An `async` write half of stream that wraps a `rustls` connection and a TCP socket.
-pub struct TlsStreamWrite {
-  w: tokio::io::WriteHalf<TlsStream>,
+pub struct TlsStreamWrite<S: UnderlyingStream> {
+  w: tokio::io::WriteHalf<TlsStream<S>>,
   handshake: Arc<HandshakeWatch>,
-  tcp: Option<Arc<TcpStream>>,
+  tcp: Option<Arc<S>>,
 }
 
-impl TlsStreamWrite {
+impl TlsStreamWrite<TcpStream> {
   /// Returns the peer address of this socket.
   pub fn peer_addr(&self) -> Result<std::net::SocketAddr, io::Error> {
     let Some(tcp) = &self.tcp else {
@@ -1126,7 +1173,9 @@ impl TlsStreamWrite {
     };
     tcp.local_addr()
   }
+}
 
+impl<S: UnderlyingStream> TlsStreamWrite<S> {
   pub fn poll_handshake(
     &mut self,
     cx: &mut Context,
@@ -1154,7 +1203,7 @@ impl TlsStreamWrite {
   }
 }
 
-impl AsyncWrite for TlsStreamWrite {
+impl<S: UnderlyingStream> AsyncWrite for TlsStreamWrite<S> {
   fn poll_write(
     mut self: Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -1218,6 +1267,8 @@ pub(super) mod tests {
   use tokio::sync::Barrier;
 
   type TestResult = Result<(), std::io::Error>;
+
+  type TlsStream = super::TlsStream<TcpStream>;
 
   fn server_config(alpn: &[&str]) -> ServerConfig {
     let mut config = ServerConfig::builder()
@@ -2025,7 +2076,7 @@ pub(super) mod tests {
     // This test occasionally shows up as ConnectionReset on Mac -- the delay ensures we wait long enough
     // for the handshake to settle.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    server.shutdown().await?;
+    <TcpStream as AsyncWriteExt>::shutdown(&mut server).await?;
 
     let expected = ErrorKind::UnexpectedEof;
 
@@ -2038,7 +2089,7 @@ pub(super) mod tests {
   #[tokio::test]
   async fn test_server_crash_before_handshake() -> TestResult {
     let (mut server, mut client) = tls_with_tcp_server(false).await;
-    server.shutdown().await?;
+    <TcpStream as AsyncWriteExt>::shutdown(&mut server).await?;
     drop(server);
 
     let expected = ErrorKind::UnexpectedEof;
@@ -2054,7 +2105,7 @@ pub(super) mod tests {
     let (server, mut client) = tls_pair_handshake().await;
 
     let (mut tcp, _tls) = server.into_inner().await.unwrap();
-    tcp.shutdown().await?;
+    <TcpStream as AsyncWriteExt>::shutdown(&mut tcp).await?;
     drop(tcp);
 
     // Can't read -- server shut down. This is an unexpected EOF.

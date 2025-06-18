@@ -1,3 +1,4 @@
+use crate::stream::UnderlyingStream;
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use crate::trace;
 use rustls::server::AcceptedAlert;
@@ -7,7 +8,6 @@ use std::io;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
-use tokio::net::TcpStream;
 
 /// Convert a [`rustls::Error`] to an [`io::Error`]
 pub fn rustls_to_io_error(error: rustls::Error) -> io::Error {
@@ -51,7 +51,7 @@ fn trace_error(error: io::Error) -> io::Error {
 
 pub struct ImplementReadTrait<'a, T>(pub &'a T);
 
-impl Read for ImplementReadTrait<'_, TcpStream> {
+impl<S: UnderlyingStream> Read for ImplementReadTrait<'_, S> {
   fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
     let res = self.0.try_read(buf);
     trace!("r({})={:?}", buf.len(), res);
@@ -71,7 +71,7 @@ impl Read for ImplementReadTrait<'_, TcpStream> {
 
 pub struct ImplementWriteTrait<'a, T>(pub &'a T);
 
-impl Write for ImplementWriteTrait<'_, TcpStream> {
+impl<S: UnderlyingStream> Write for ImplementWriteTrait<'_, S> {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     let res = self.0.try_write(buf);
     trace!("w={:?}", res);
@@ -91,26 +91,32 @@ impl Write for ImplementWriteTrait<'_, TcpStream> {
   }
 }
 
-pub fn read_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
+pub fn read_tls<S: UnderlyingStream>(
+  tcp: &S,
+  tls: &mut Connection,
+) -> io::Result<usize> {
   let mut read = ImplementReadTrait(tcp);
   tls.read_tls(&mut read)
 }
 
-pub fn write_tls(tcp: &TcpStream, tls: &mut Connection) -> io::Result<usize> {
+pub fn write_tls<S: UnderlyingStream>(
+  tcp: &S,
+  tls: &mut Connection,
+) -> io::Result<usize> {
   let mut write = ImplementWriteTrait(tcp);
   tls.write_tls(&mut write)
 }
 
-pub fn read_acceptor(
-  tcp: &TcpStream,
+pub fn read_acceptor<S: UnderlyingStream>(
+  tcp: &S,
   acceptor: &mut Acceptor,
 ) -> io::Result<usize> {
   let mut read = ImplementReadTrait(tcp);
   acceptor.read_tls(&mut read)
 }
 
-pub fn write_acceptor_alert(
-  tcp: &TcpStream,
+pub fn write_acceptor_alert<S: UnderlyingStream>(
+  tcp: &S,
   mut alert: AcceptedAlert,
 ) -> io::Result<()> {
   let mut write = ImplementWriteTrait(tcp);
