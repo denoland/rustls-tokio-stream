@@ -1,7 +1,6 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
 use rustls::Connection;
 use rustls::IoState;
-use socket2::SockRef;
 use std::io;
 use std::io::BufRead;
 use std::io::ErrorKind;
@@ -12,11 +11,11 @@ use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
 use tokio::io::ReadBuf;
-use tokio::net::TcpStream;
 
 use crate::adapter::read_tls;
 use crate::adapter::rustls_to_io_error;
 use crate::adapter::write_tls;
+use crate::stream::UnderlyingStream;
 use crate::trace;
 
 /// A poll context may be explicit (ie: passed by the external user) or implicit (ie: using whatever stashed waker
@@ -53,11 +52,11 @@ impl<'a, 'b: 'a> PollContext<'a, 'b> {
   }
 }
 
-pub struct ConnectionStream {
+pub struct ConnectionStream<S> {
   tls: Connection,
   // TODO(mmastrac): This is kept as an Arc because we may need to split the TlsStream and may need it in
   // multiple places. Instead, we should allow splitting the connection stream.
-  tcp: Arc<TcpStream>,
+  tcp: Arc<S>,
   last_iostate: Option<IoState>,
   /// If poll_shutdown has been called at least once
   wants_close_sent: bool,
@@ -83,8 +82,8 @@ enum StreamProgress {
   Error,
 }
 
-impl ConnectionStream {
-  pub fn new(tcp: Arc<TcpStream>, tls: Connection) -> Self {
+impl<S: UnderlyingStream> ConnectionStream<S> {
+  pub fn new(tcp: Arc<S>, tls: Connection) -> Self {
     Self {
       tls,
       tcp,
@@ -99,7 +98,7 @@ impl ConnectionStream {
     }
   }
 
-  pub fn into_inner(self) -> (TcpStream, Connection) {
+  pub fn into_inner(self) -> (S, Connection) {
     // We always have a single refcount at this point
     (Arc::try_unwrap(self.tcp).unwrap(), self.tls)
   }
@@ -108,7 +107,7 @@ impl ConnectionStream {
     &self.tls
   }
 
-  pub(crate) fn tcp_stream(&self) -> &Arc<TcpStream> {
+  pub(crate) fn underlying_stream(&self) -> &Arc<S> {
     &self.tcp
   }
 
@@ -126,7 +125,7 @@ impl ConnectionStream {
       StreamProgress::Error
     } else if self.tls.wants_read() {
       loop {
-        match read_tls(&self.tcp, &mut self.tls) {
+        match read_tls(&*self.tcp, &mut self.tls) {
           Ok(n) => {
             if n == 0 {
               self.rd_error = Some(ErrorKind::UnexpectedEof);
@@ -172,7 +171,7 @@ impl ConnectionStream {
     } else if self.tls.wants_write() {
       loop {
         debug_assert!(self.tls.wants_write());
-        match write_tls(&self.tcp, &mut self.tls) {
+        match write_tls(&*self.tcp, &mut self.tls) {
           Ok(n) => {
             assert!(n > 0);
             break StreamProgress::MadeProgress;
@@ -501,7 +500,7 @@ impl ConnectionStream {
     ready!(self.poll_flush(cx)?);
     debug_assert!(!self.tls.wants_write());
 
-    _ = SockRef::from(&self.tcp).shutdown(std::net::Shutdown::Write);
+    _ = self.tcp.shutdown(std::net::Shutdown::Write);
 
     trace!("poll_shutdown complete");
 
@@ -510,7 +509,7 @@ impl ConnectionStream {
 }
 
 #[cfg(test)]
-impl tokio::io::AsyncRead for ConnectionStream {
+impl<S: UnderlyingStream> tokio::io::AsyncRead for ConnectionStream<S> {
   fn poll_read(
     self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -521,7 +520,7 @@ impl tokio::io::AsyncRead for ConnectionStream {
 }
 
 #[cfg(test)]
-impl tokio::io::AsyncWrite for ConnectionStream {
+impl<S: UnderlyingStream> tokio::io::AsyncWrite for ConnectionStream<S> {
   fn poll_write(
     self: std::pin::Pin<&mut Self>,
     cx: &mut Context<'_>,
@@ -575,13 +574,14 @@ mod tests {
   use rustls::ServerConnection;
   use std::time::Duration;
   use tokio::io::AsyncWriteExt;
+  use tokio::net::TcpStream;
   use tokio::spawn;
 
-  async fn expect_write_1(conn: &mut ConnectionStream) {
+  async fn expect_write_1(conn: &mut ConnectionStream<TcpStream>) {
     assert_eq!(poll_fn(|cx| conn.poll_write(cx, b"x")).await.unwrap(), 1);
   }
 
-  async fn wait_for_peek(conn: &mut ConnectionStream) {
+  async fn wait_for_peek(conn: &mut ConnectionStream<TcpStream>) {
     loop {
       let mut buf = [0; 1];
       if conn.tcp.peek(&mut buf).await.unwrap() == 1 {
@@ -590,7 +590,9 @@ mod tests {
     }
   }
 
-  async fn wait_for_peek_n<const N: usize>(conn: &mut ConnectionStream) {
+  async fn wait_for_peek_n<const N: usize>(
+    conn: &mut ConnectionStream<TcpStream>,
+  ) {
     loop {
       let mut buf = [0; N];
       if conn.tcp.peek(&mut buf).await.unwrap() == N {
@@ -600,7 +602,7 @@ mod tests {
     }
   }
 
-  async fn expect_read_1(conn: &mut ConnectionStream) {
+  async fn expect_read_1(conn: &mut ConnectionStream<TcpStream>) {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
     assert_eq!(
@@ -611,7 +613,10 @@ mod tests {
     );
   }
 
-  async fn expect_read_1_err(conn: &mut ConnectionStream, error: ErrorKind) {
+  async fn expect_read_1_err(
+    conn: &mut ConnectionStream<TcpStream>,
+    error: ErrorKind,
+  ) {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
     let err = poll_fn(|cx| conn.poll_read(cx, &mut read_buf))
@@ -620,7 +625,8 @@ mod tests {
     assert_eq!(err.kind(), error);
   }
 
-  async fn tls_pair() -> (ConnectionStream, ConnectionStream) {
+  async fn tls_pair(
+  ) -> (ConnectionStream<TcpStream>, ConnectionStream<TcpStream>) {
     let (server, client) = crate::tests::tcp_pair().await;
     let tls_server = ServerConnection::new(server_config().into())
       .unwrap()
@@ -689,7 +695,7 @@ mod tests {
 
     // Half-close
     let mut tcp = client.into_inner().0;
-    tcp.shutdown().await?;
+    <TcpStream as AsyncWriteExt>::shutdown(&mut tcp).await?;
 
     // One byte will read fine
     expect_read_1(&mut server).await;
@@ -758,7 +764,7 @@ mod tests {
 
     // Half-close
     let (mut tcp, tls) = client.into_inner();
-    tcp.shutdown().await?;
+    <TcpStream as AsyncWriteExt>::shutdown(&mut tcp).await?;
     let mut client = ConnectionStream::new(tcp.into(), tls);
 
     // One byte will read fine
