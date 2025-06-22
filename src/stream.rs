@@ -10,6 +10,8 @@ use crate::handshake::handshake_task;
 use crate::handshake::HandshakeResult;
 use crate::trace;
 use crate::TestOptions;
+use derive_io::AsyncRead;
+use derive_io::AsyncWrite;
 use futures::task::AtomicWaker;
 use futures::FutureExt;
 use rustls::server::Acceptor;
@@ -116,6 +118,7 @@ struct HandshakeWatch {
   tx_waker: AtomicWaker,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TlsStreamState<S: UnderlyingStream> {
   /// If we are handshaking, writes are buffered and reads block.
   // TODO(mmastrac): We should be buffered in the Connection, not the Vec, as this results in a double-copy.
@@ -1182,7 +1185,9 @@ impl<S: UnderlyingStream> Drop for TlsStream<S> {
 }
 
 /// An `async` read half of stream that wraps a `rustls` connection and a TCP socket.
+#[derive(AsyncRead)]
 pub struct TlsStreamRead<S: UnderlyingStream> {
+  #[read]
   r: tokio::io::ReadHalf<TlsStream<S>>,
   handshake: Arc<HandshakeWatch>,
   tcp: Option<Arc<S>>,
@@ -1239,18 +1244,10 @@ impl<S: UnderlyingStream> TlsStreamRead<S> {
   }
 }
 
-impl<S: UnderlyingStream> AsyncRead for TlsStreamRead<S> {
-  fn poll_read(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut ReadBuf<'_>,
-  ) -> Poll<io::Result<()>> {
-    Pin::new(&mut self.r).poll_read(cx, buf)
-  }
-}
-
 /// An `async` write half of stream that wraps a `rustls` connection and a TCP socket.
+#[derive(AsyncWrite)]
 pub struct TlsStreamWrite<S: UnderlyingStream> {
+  #[write]
   w: tokio::io::WriteHalf<TlsStream<S>>,
   handshake: Arc<HandshakeWatch>,
   tcp: Option<Arc<S>>,
@@ -1299,42 +1296,6 @@ impl<S: UnderlyingStream> TlsStreamWrite<S> {
       None => Ok(None),
       Some(r) => clone_result(r).map(Some),
     }
-  }
-}
-
-impl<S: UnderlyingStream> AsyncWrite for TlsStreamWrite<S> {
-  fn poll_write(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<Result<usize, io::Error>> {
-    Pin::new(&mut self.w).poll_write(cx, buf)
-  }
-
-  fn poll_write_vectored(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    bufs: &[io::IoSlice<'_>],
-  ) -> Poll<Result<usize, io::Error>> {
-    Pin::new(&mut self.w).poll_write_vectored(cx, bufs)
-  }
-
-  fn poll_flush(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<Result<(), io::Error>> {
-    Pin::new(&mut self.w).poll_flush(cx)
-  }
-
-  fn poll_shutdown(
-    mut self: Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<Result<(), io::Error>> {
-    Pin::new(&mut self.w).poll_shutdown(cx)
-  }
-
-  fn is_write_vectored(&self) -> bool {
-    self.w.is_write_vectored()
   }
 }
 
