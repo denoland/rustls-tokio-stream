@@ -1,6 +1,4 @@
 // Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
-use rustls::Connection;
-use rustls::IoState;
 use std::io;
 use std::io::BufRead;
 use std::io::ErrorKind;
@@ -10,6 +8,11 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+
+use derive_io::AsyncRead;
+use derive_io::AsyncWrite;
+use rustls::Connection;
+use rustls::IoState;
 use tokio::io::ReadBuf;
 
 use crate::adapter::read_tls;
@@ -52,7 +55,10 @@ impl<'a, 'b: 'a> PollContext<'a, 'b> {
   }
 }
 
-pub struct ConnectionStream<S> {
+#[derive(AsyncRead, AsyncWrite)]
+#[read(duck)]
+#[write(duck)]
+pub struct ConnectionStream<S: UnderlyingStream> {
   tls: Connection,
   // TODO(mmastrac): This is kept as an Arc because we may need to split the TlsStream and may need it in
   // multiple places. Instead, we should allow splitting the connection stream.
@@ -212,7 +218,7 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
       }
       let chunk = reader.fill_buf();
       break match chunk {
-        Ok(n) if n.is_empty() => {
+        Ok([]) => {
           trace!("r*=0");
           Ok(read)
         }
@@ -268,6 +274,15 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
     }
   }
 
+  /// Traditional `poll_read`.
+  pub fn poll_read(
+    &mut self,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+  ) -> Poll<io::Result<()>> {
+    self.poll_read_size(cx, buf).map_ok(drop)
+  }
+
   /// Polls the connection for read, writing as needed. As TLS may need to pump writes during reads, or
   /// pump reads during writes, we must ensure that the waker is woken if writes are ready, even though
   /// this is a read polling operation.
@@ -277,7 +292,7 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
   /// This function will return [`Poll::Pending`] if reads were unable to progress at all.
   ///
   /// The waker will be woken if either reads or writes may be able to make further progress.
-  pub fn poll_read(
+  pub fn poll_read_size(
     &mut self,
     cx: &mut Context<'_>,
     buf: &mut ReadBuf<'_>,
@@ -375,6 +390,12 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
       assert!(n > 0);
       n
     })
+  }
+
+  pub fn is_write_vectored(&self) -> bool {
+    // While rustls supports vectored writes, they act more like buffered writes so
+    // we should prefer upstream producers to pre-aggregate when possible.
+    false
   }
 
   pub fn poll_write_vectored(
@@ -509,58 +530,9 @@ impl<S: UnderlyingStream> ConnectionStream<S> {
 }
 
 #[cfg(test)]
-impl<S: UnderlyingStream> tokio::io::AsyncRead for ConnectionStream<S> {
-  fn poll_read(
-    self: std::pin::Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &mut ReadBuf<'_>,
-  ) -> Poll<io::Result<()>> {
-    ConnectionStream::poll_read(self.get_mut(), cx, buf).map(|r| r.map(|_| ()))
-  }
-}
-
-#[cfg(test)]
-impl<S: UnderlyingStream> tokio::io::AsyncWrite for ConnectionStream<S> {
-  fn poll_write(
-    self: std::pin::Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    buf: &[u8],
-  ) -> Poll<Result<usize, io::Error>> {
-    ConnectionStream::poll_write(self.get_mut(), cx, buf)
-  }
-
-  fn poll_write_vectored(
-    self: std::pin::Pin<&mut Self>,
-    cx: &mut Context<'_>,
-    bufs: &[futures::io::IoSlice<'_>],
-  ) -> Poll<Result<usize, io::Error>> {
-    ConnectionStream::poll_write_vectored(self.get_mut(), cx, bufs)
-  }
-
-  fn is_write_vectored(&self) -> bool {
-    // While rustls supports vectored writes, they act more like buffered writes so
-    // we should prefer upstream producers to pre-aggregate when possible.
-    false
-  }
-
-  fn poll_flush(
-    self: std::pin::Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<Result<(), io::Error>> {
-    ConnectionStream::poll_flush(self.get_mut(), cx)
-  }
-
-  fn poll_shutdown(
-    self: std::pin::Pin<&mut Self>,
-    cx: &mut Context<'_>,
-  ) -> Poll<Result<(), io::Error>> {
-    ConnectionStream::poll_shutdown(self.get_mut(), cx)
-  }
-}
-
-#[cfg(test)]
 mod tests {
-  use super::*;
+  use super::ConnectionStream;
+
   use crate::handshake::handshake_task;
   use crate::tests::client_config;
   use crate::tests::server_config;
@@ -572,13 +544,19 @@ mod tests {
   use futures::task::noop_waker_ref;
   use rustls::ClientConnection;
   use rustls::ServerConnection;
+  use std::io::ErrorKind;
+  use std::io::Write;
+  use std::task::Context;
+  use std::task::Poll;
   use std::time::Duration;
+  use tokio::io::AsyncReadExt;
   use tokio::io::AsyncWriteExt;
+  use tokio::io::ReadBuf;
   use tokio::net::TcpStream;
   use tokio::spawn;
 
   async fn expect_write_1(conn: &mut ConnectionStream<TcpStream>) {
-    assert_eq!(poll_fn(|cx| conn.poll_write(cx, b"x")).await.unwrap(), 1);
+    assert_eq!(conn.write(b"x").await.unwrap(), 1);
   }
 
   async fn wait_for_peek(conn: &mut ConnectionStream<TcpStream>) {
@@ -606,7 +584,7 @@ mod tests {
     let mut buf = [0; 1];
     let mut read_buf = ReadBuf::new(&mut buf);
     assert_eq!(
-      poll_fn(|cx| conn.poll_read(cx, &mut read_buf))
+      poll_fn(|cx| conn.poll_read_size(cx, &mut read_buf))
         .await
         .unwrap(),
       1
@@ -617,11 +595,7 @@ mod tests {
     conn: &mut ConnectionStream<TcpStream>,
     error: ErrorKind,
   ) {
-    let mut buf = [0; 1];
-    let mut read_buf = ReadBuf::new(&mut buf);
-    let err = poll_fn(|cx| conn.poll_read(cx, &mut read_buf))
-      .await
-      .expect_err("expected error");
+    let err = conn.read_u8().await.expect_err("expected error");
     assert_eq!(err.kind(), error);
   }
 
@@ -695,7 +669,7 @@ mod tests {
 
     // Half-close
     let mut tcp = client.into_inner().0;
-    <TcpStream as AsyncWriteExt>::shutdown(&mut tcp).await?;
+    tcp.shutdown().await?;
 
     // One byte will read fine
     expect_read_1(&mut server).await;
@@ -764,7 +738,7 @@ mod tests {
 
     // Half-close
     let (mut tcp, tls) = client.into_inner();
-    <TcpStream as AsyncWriteExt>::shutdown(&mut tcp).await?;
+    tcp.shutdown().await?;
     let mut client = ConnectionStream::new(tcp.into(), tls);
 
     // One byte will read fine
@@ -855,7 +829,7 @@ mod tests {
     let mut total_read = 0;
     while total_read < total / 2 {
       let mut read_buf = ReadBuf::new(&mut buf);
-      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+      total_read += poll_fn(|cx| client.poll_read_size(cx, &mut read_buf))
         .await
         .unwrap();
     }
@@ -893,7 +867,7 @@ mod tests {
     let mut total_read = 0;
     while total_read < total / 2 {
       let mut read_buf = ReadBuf::new(&mut buf);
-      total_read += poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+      total_read += poll_fn(|cx| client.poll_read_size(cx, &mut read_buf))
         .await
         .unwrap();
     }
@@ -905,7 +879,7 @@ mod tests {
 
     loop {
       let mut read_buf = ReadBuf::new(&mut buf);
-      let n = poll_fn(|cx| client.poll_read(cx, &mut read_buf))
+      let n = poll_fn(|cx| client.poll_read_size(cx, &mut read_buf))
         .await
         .unwrap();
       total_read += n;

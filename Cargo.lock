@@ -78,6 +78,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "derive-io"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58cc7f4740088458993d183a200fe56e62378736f94bf0e2dd45807407e7bb94"
+dependencies = [
+ "derive-io-macros",
+ "tokio",
+]
+
+[[package]]
+name = "derive-io-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d0a1bd7eeab72097740967d03d53db5fbaf8e3c0dd471ebdefa43ce445a20a6"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -578,6 +597,7 @@ checksum = "917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c"
 name = "rustls-tokio-stream"
 version = "0.6.0"
 dependencies = [
+ "derive-io",
  "fastwebsockets",
  "futures",
  "ntest",
