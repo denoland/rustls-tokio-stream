@@ -595,7 +595,7 @@ checksum = "917ce264624a4b4db1c364dcc35bfca9ded014d0a958cd47ad3e960e988ea51c"
 
 [[package]]
 name = "rustls-tokio-stream"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "derive-io",
  "fastwebsockets",

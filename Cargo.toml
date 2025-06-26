@@ -1,6 +1,6 @@
 [package]
 name = "rustls-tokio-stream"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "AsyncRead/AsyncWrite interface for RustTLS on Tokio"
 license = "MIT"
