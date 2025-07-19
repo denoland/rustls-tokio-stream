@@ -115,8 +115,6 @@ impl Default for DeferredWakers {
 #[derive(Default)]
 struct HandshakeWatch {
   handshake: Mutex<Option<io::Result<TlsHandshake>>>,
-  peer_certificates:
-    Mutex<Option<Vec<rustls::pki_types::CertificateDer<'static>>>>,
   rx_waker: AtomicWaker,
   tx_waker: AtomicWaker,
 }
@@ -281,6 +279,9 @@ pub struct TlsHandshake {
   /// For client-to-server connections, will always return true. For server-to-client connections, returns
   /// true if the client provided a valid certificate.
   pub has_peer_certificates: bool,
+  /// The peer certificates from the TLS handshake, if available.
+  pub peer_certificates:
+    Option<Vec<rustls::pki_types::CertificateDer<'static>>>,
 }
 
 impl TlsStream<TcpStream> {
@@ -742,13 +743,6 @@ impl<S: UnderlyingStream + 'static> TlsStream<S> {
             // that matches our buffer, so it can accept it all.
             stm.write_buf_fully(&buf);
 
-            // Store peer certificates for access by split halves
-            let peer_certs = stm
-              .connection()
-              .peer_certificates()
-              .map(|certs| certs.iter().map(|cert| cert.clone()).collect());
-            *self.handshake.peer_certificates.lock().unwrap() = peer_certs;
-
             wakers.wake();
             self.state = TlsStreamState::Open(stm);
             Ok(())
@@ -896,10 +890,15 @@ async fn send_handshake<S: UnderlyingStream>(
   let res = handshake_task(tcp, tls, test_options).await;
   match &res {
     Ok(res) => {
-      let has_peer_certificates = res
+      let peer_certificates = res
         .1
         .peer_certificates()
-        .map(|c| !c.is_empty())
+        .map(|certs| certs.iter().map(|cert| cert.clone()).collect());
+      let has_peer_certificates = peer_certificates
+        .as_ref()
+        .map(|c: &Vec<rustls::pki_types::CertificateDer<'static>>| {
+          !c.is_empty()
+        })
         .unwrap_or_default();
       let alpn = res.1.alpn_protocol().map(|v| v.to_owned());
       let sni = match &res.1 {
@@ -912,6 +911,7 @@ async fn send_handshake<S: UnderlyingStream>(
         alpn,
         sni,
         has_peer_certificates,
+        peer_certificates,
       }));
     }
     Err(err) => {
@@ -1251,13 +1251,6 @@ impl<S: UnderlyingStream> TlsStreamRead<S> {
       Some(r) => clone_result(r).map(Some),
     }
   }
-
-  /// This returns the certificates if the TLS handshake has completed successfully.
-  pub fn peer_certificates(
-    &self,
-  ) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    self.handshake.peer_certificates.lock().unwrap().clone()
-  }
 }
 
 /// An `async` write half of stream that wraps a `rustls` connection and a TCP socket.
@@ -1312,14 +1305,6 @@ impl<S: UnderlyingStream> TlsStreamWrite<S> {
       None => Ok(None),
       Some(r) => clone_result(r).map(Some),
     }
-  }
-
-  /// Returns the peer certificates, if available.
-  /// This returns the certificates if the TLS handshake has completed successfully.
-  pub fn peer_certificates(
-    &self,
-  ) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    self.handshake.peer_certificates.lock().unwrap().clone()
   }
 }
 
@@ -2464,7 +2449,7 @@ pub(super) mod tests {
     Ok(())
   }
 
-  /// Test that the peer_certificates() method on split streams returns None before handshake.
+  /// Test that the peer_certificates are not available before handshake.
   #[tokio::test]
   async fn test_split_peer_certificates_before_handshake() -> TestResult {
     let (server, client) = tls_pair().await;
@@ -2472,29 +2457,28 @@ pub(super) mod tests {
     let (server_read, server_write) = server.into_split();
     let (client_read, client_write) = client.into_split();
 
-    // Test that peer_certificates() returns None before handshake
+    // Test that handshake returns None before completion
     assert!(
-      server_read.peer_certificates().is_none(),
-      "Server read peer_certificates should be None before handshake"
+      server_read.try_handshake()?.is_none(),
+      "Server handshake should be None before completion"
     );
     assert!(
-      server_write.peer_certificates().is_none(),
-      "Server write peer_certificates should be None before handshake"
+      server_write.try_handshake()?.is_none(),
+      "Server handshake should be None before completion"
     );
     assert!(
-      client_read.peer_certificates().is_none(),
-      "Client read peer_certificates should be None before handshake"
+      client_read.try_handshake()?.is_none(),
+      "Client handshake should be None before completion"
     );
     assert!(
-      client_write.peer_certificates().is_none(),
-      "Client write peer_certificates should be None before handshake"
+      client_write.try_handshake()?.is_none(),
+      "Client handshake should be None before completion"
     );
 
     Ok(())
   }
 
-  /// Test that the peer_certificates() method on split streams works correctly
-  /// after handshake and returns consistent results.
+  /// Test that the peer_certificates are available via handshake after completion.
   #[tokio::test]
   async fn test_split_peer_certificates_access() -> TestResult {
     let (server, client) = tls_pair_handshake().await;
@@ -2502,27 +2486,33 @@ pub(super) mod tests {
     let (server_read, server_write) = server.into_split();
     let (client_read, client_write) = client.into_split();
 
-    // Test that peer_certificates() is available after handshake
+    // Test that peer_certificates are available via handshake after completion
+    let server_read_handshake = server_read.try_handshake()?.unwrap();
+    let server_write_handshake = server_write.try_handshake()?.unwrap();
+    let client_read_handshake = client_read.try_handshake()?.unwrap();
+    let client_write_handshake = client_write.try_handshake()?.unwrap();
 
-    // Test that peer_certificates() works on both halves
-    let server_read_certs = server_read.peer_certificates();
-    let server_write_certs = server_write.peer_certificates();
-    let client_read_certs = client_read.peer_certificates();
-    let client_write_certs = client_write.peer_certificates();
+    // Both halves should return the same peer certificates via handshake
+    assert_eq!(
+      server_read_handshake.peer_certificates.is_some(),
+      server_write_handshake.peer_certificates.is_some()
+    );
+    assert_eq!(
+      client_read_handshake.peer_certificates.is_some(),
+      client_write_handshake.peer_certificates.is_some()
+    );
 
-    // Both halves should return the same certificates
-    assert_eq!(server_read_certs.is_some(), server_write_certs.is_some());
-    assert_eq!(client_read_certs.is_some(), client_write_certs.is_some());
-
-    if let (Some(read_certs), Some(write_certs)) =
-      (&server_read_certs, &server_write_certs)
-    {
+    if let (Some(read_certs), Some(write_certs)) = (
+      &server_read_handshake.peer_certificates,
+      &server_write_handshake.peer_certificates,
+    ) {
       assert_eq!(read_certs.len(), write_certs.len());
     }
 
-    if let (Some(read_certs), Some(write_certs)) =
-      (&client_read_certs, &client_write_certs)
-    {
+    if let (Some(read_certs), Some(write_certs)) = (
+      &client_read_handshake.peer_certificates,
+      &client_write_handshake.peer_certificates,
+    ) {
       assert_eq!(read_certs.len(), write_certs.len());
     }
 
