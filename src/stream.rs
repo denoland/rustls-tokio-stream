@@ -147,7 +147,6 @@ pub type ServerConfigProvider = Arc<
 >;
 
 pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
-  type StdType: Send;
   fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
   fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
   fn try_read(&self, buf: &mut [u8]) -> io::Result<usize>;
@@ -156,10 +155,6 @@ pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
   fn writable(&self) -> impl Future<Output = io::Result<()>> + Send;
 
   fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()>;
-
-  fn into_std(self) -> Option<std::io::Result<Self::StdType>> {
-    None
-  }
 
   fn downcast<S: UnderlyingStream>(self) -> Result<S, Self> {
     let mut holder = Some(self);
@@ -173,7 +168,6 @@ pub trait UnderlyingStream: Debug + Send + Sync + Sized + 'static {
 }
 
 impl UnderlyingStream for TcpStream {
-  type StdType = std::net::TcpStream;
   #[inline(always)]
   fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self.poll_read_ready(cx)
@@ -201,16 +195,11 @@ impl UnderlyingStream for TcpStream {
   #[inline(always)]
   fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
     SockRef::from(&self).shutdown(how)
-  }
-  #[inline(always)]
-  fn into_std(self) -> Option<std::io::Result<std::net::TcpStream>> {
-    Some(self.into_std())
   }
 }
 
 #[cfg(unix)]
 impl UnderlyingStream for tokio::net::UnixStream {
-  type StdType = std::os::unix::net::UnixStream;
   #[inline(always)]
   fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
     self.poll_read_ready(cx)
@@ -238,10 +227,6 @@ impl UnderlyingStream for tokio::net::UnixStream {
   #[inline(always)]
   fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
     SockRef::from(&self).shutdown(how)
-  }
-  #[inline(always)]
-  fn into_std(self) -> Option<std::io::Result<std::os::unix::net::UnixStream>> {
-    Some(self.into_std())
   }
 }
 
