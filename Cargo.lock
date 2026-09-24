@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "rustls-tokio-stream"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "derive-io",
  "fastwebsockets",
